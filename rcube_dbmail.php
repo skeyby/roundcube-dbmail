@@ -997,6 +997,20 @@ class rcube_dbmail extends rcube_storage {
             return FALSE;
         }
 
+        // TO DO!!!!! Use Mail_mimeDecode (Pear) to manage multipart messages
+
+        $mime = new Mail_mimeDecode($message);
+
+        $params = array();
+        $params['include_bodies'] = TRUE;
+        $params['decode_bodies'] = TRUE;
+        $params['decode_headers'] = TRUE;
+        $params['rfc_822bodies'] = TRUE;
+        
+        console(json_encode($mime->decode($params)));
+        die;
+
+
         $response = $this->store_message($mailbox_idnr, $message);
 
         console('store_message response:');
