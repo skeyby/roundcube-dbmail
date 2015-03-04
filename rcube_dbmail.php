@@ -10,6 +10,11 @@
  * 2. add the following lines to roundcube/config/config.inc.php
  *    $config['storage_driver'] = 'dbmail';
  *    $config['dbmail_dsn'] = 'mysql://user:pass@host/db'; # dsn connection string
+ * 
+ * !!! IMPORTANT !!!
+ * Use the official PEAR Mail_mimeDecode library, changing following line in 'composer.json'
+ * change  "pear/mail_mime-decode": ">=1.5.5",
+ * to      "pear-pear.php.net/Mail_mimeDecode": ">=1.5.5",
  */
 class rcube_dbmail extends rcube_storage {
 
@@ -622,22 +627,63 @@ class rcube_dbmail extends rcube_storage {
             $folder = $this->folder;
         }
 
-        $headers = $this->get_message_headers($uid, $folder);
+        // message exists?
+        $query = " SELECT * "
+                . " FROM dbmail_messages "
+                . " WHERE message_idnr = '{$this->dbmail->escape($uid)}' ";
 
-        // message doesn't exist?
-        if (empty($headers)) {
-            return null;
+        $res = $this->dbmail->query($query);
+        if ($this->dbmail->num_rows($res) == 0) {
+            // not found
+            return FALSE;
         }
 
-        list($ctype_primary, $ctype_secondary) = explode('/', $headers->ctype);
+        $message_metadata = $this->dbmail->fetch_assoc($res);
 
-        if (strtoupper($ctype_primary) == 'MULTIPART') {
+        $physmessage_id = $message_metadata['physmessage_id'];
 
-            // get multi-part data
-            $headers = $this->get_message_multipart_data($headers, $uid, $headers->ctype);
-        }
+        // extract mime parts
+        $mime = $this->fetch_part_lists($physmessage_id);
 
-        return $headers;
+        // prepare response
+        $rcmh = new rcube_message_header();
+        $rcmh->id = $uid;
+        $rcmh->uid = $uid;
+        $rcmh->folder = $message_metadata['mailbox_name'];
+        $rcmh->subject = $this->get_header_value($mime->header, 'Subject');
+        $rcmh->from = $this->get_header_value($mime->header, 'From');
+        $rcmh->to = $this->get_header_value($mime->header, 'To');
+        $rcmh->cc = $this->get_header_value($mime->header, 'Cc');
+        $rcmh->bcc = $this->get_header_value($mime->header, 'Bcc');
+        $rcmh->replyto = $this->get_header_value($mime->header, 'Reply-To');
+        $rcmh->in_reply_to = $this->get_header_value($mime->header, 'In-Reply-To');
+        $rcmh->ctype = $this->get_header_value($mime->header, 'Content-Type');
+        $rcmh->references = $this->get_header_value($mime->header, 'References');
+        $rcmh->mdn_to = $this->get_header_value($mime->header, 'Return-Receipt-To');
+        $rcmh->priority = $this->get_header_value($mime->header, 'X-Priority');
+        $rcmh->date = $this->get_header_value($mime->header, 'Date');
+        $rcmh->internaldate = $this->get_header_value($mime->header, 'Date');
+        $rcmh->messageID = $this->get_header_value($mime->header, 'Message-ID');
+        $rcmh->size = $message_metadata['messagesize'];
+        $rcmh->timestamp = time();
+        $rcmh->flags["SEEN"] = ($message_metadata['seen_flag'] == 1 ? TRUE : FALSE);
+        $rcmh->flags["ANSWERED"] = ($message_metadata['answered_flag'] == 1 ? TRUE : FALSE);
+        $rcmh->flags["DELETED"] = ($message_metadata['deleted_flag'] == 1 ? TRUE : FALSE);
+        $rcmh->flags["FLAGGED"] = ($message_metadata['flagged_flag'] == 1 ? TRUE : FALSE);
+        $rcmh->bodystructure = array();
+
+        $mime_decode = new Mail_mimeDecode($mime->header . "\r\n" . $mime->body);
+
+        $decode_params = array(
+            'include_bodies' => TRUE,
+            'decode_bodies' => TRUE,
+            'decode_headers' => TRUE,
+            'rfc_822bodies' => TRUE
+        );
+
+        $rcmh->structure = $mime_decode->decode($decode_params);
+
+        return $rcmh;
     }
 
     /**
@@ -991,25 +1037,39 @@ class rcube_dbmail extends rcube_storage {
           [27-Feb-2015 11:33:21 +0100]: <s2l5e7bj> NULL
          */
 
+
+        $params = array(
+            'include_bodies' => TRUE,
+            'decode_bodies' => TRUE,
+            'decode_headers' => TRUE,
+            'rfc_822bodies' => TRUE
+        );
+
+        $decode = new Mail_mimeDecode($message, "\n");
+        $structure = $decode->decode($params);
+        print_r($structure);
+
+        $decode_2 = new Mail_mimeDecode($structure->body, "\n");
+        $structure_2 = $decode_2->decode($params);
+        print_r($structure_2);
+
+        die;
+
+        /*            $this->_include_bodies = isset($params['include_bodies']) ?
+          $params['include_bodies'] : false;
+          $this->_decode_bodies  = isset($params['decode_bodies']) ?
+          $params['decode_bodies']  : false;
+          $this->_decode_headers = isset($params['decode_headers']) ?
+          $params['decode_headers'] : false;
+          $this->_rfc822_bodies  = isset($params['rfc_822bodies']) ?
+          $params['rfc_822bodies']  : false;
+         */
+
         // destination folder exists?
         $mailbox_idnr = $this->get_mail_box_id($folder);
         if (!$mailbox_idnr) {
             return FALSE;
         }
-
-        // TO DO!!!!! Use Mail_mimeDecode (Pear) to manage multipart messages
-
-        $mime = new Mail_mimeDecode($message);
-
-        $params = array();
-        $params['include_bodies'] = TRUE;
-        $params['decode_bodies'] = TRUE;
-        $params['decode_headers'] = TRUE;
-        $params['rfc_822bodies'] = TRUE;
-        
-        console(json_encode($mime->decode($params)));
-        die;
-
 
         $response = $this->store_message($mailbox_idnr, $message);
 
@@ -2165,6 +2225,29 @@ class rcube_dbmail extends rcube_storage {
     }
 
     /**
+     * Retrive physmessage id
+     *
+     * @param int  $message_idnr    message id
+     *
+     * @return int physmessage on success, False on failure
+     */
+    protected function get_physmessage_id($message_idnr) {
+
+        $query = " SELECT physmessage_id "
+                . " FROM dbmail_messages "
+                . " WHERE message_idnr = '{$this->dbmail->escape($message_idnr)}' ";
+
+        $res = $this->dbmail->query($query);
+        $row = $this->dbmail->fetch_assoc($res);
+
+        if (!is_array($row) || !array_key_exists('physmessage_id', $row)) {
+            return FALSE;
+        }
+
+        return $row['physmessage_id'];
+    }
+
+    /**
      * Retrive user identifier
      *
      * @param string  $user    user name
@@ -2289,7 +2372,9 @@ class rcube_dbmail extends rcube_storage {
             // split row by ';' to manage multiple key=>value pairs within same row
             $items = explode(';', $row);
 
-            foreach ($items as $item) {
+            foreach ($items as &$item) {
+
+                $item = trim($item);
 
                 if ($ci_token == substr(strtoupper($item), 0, strlen($ci_token))) {
 
@@ -3020,13 +3105,35 @@ class rcube_dbmail extends rcube_storage {
     }
 
     private function store_message($mailbox_idnr, $content) {
+
+
+
+        echo 'TO DO!!!!!!!';
+        die;
+
         /*
-          console('------------------------------------------------------');
-          console('INPUT PARAMETERS');
-          console($mailbox_idnr);
-          console($content);
-          console('------------------------------------------------------');
+         * TO DO!!!!!!!!!!
+         * 
+         * fix values for:
+         * - dbmail_physmessage.messagesize
+         * - dbmail_physmessage.rfcsize
+         * - dbmail_partlists.part_depth
+         * - dbmail_partlists.part_order
+         * - dbmail_mimeparts.hash
+         * - dbmail_headervalue.hash
+         * - dbmail_headervalue.sortfield
+         * - dbmail_headervalue.datefield
          */
+
+
+        console('------------------------------------------------------');
+        console('INPUT PARAMETERS');
+        console($mailbox_idnr);
+        console($content);
+        console('------------------------------------------------------');
+        die;
+
+
         /*
          *  explode suplied content on new line
          */
@@ -3038,6 +3145,7 @@ class rcube_dbmail extends rcube_storage {
          */
         $ctype = FALSE;
         $is_multipart = FALSE;
+
         foreach ($exploded_content as $row) {
             $ctype = $this->get_header_value($row, 'Content-Type');
             if ($ctype && strtoupper(substr($ctype, 0, 9)) == 'MULTIPART') {
@@ -3051,10 +3159,10 @@ class rcube_dbmail extends rcube_storage {
             }
         }
 
-        if (!$ctype) {
-            // error - content-type not found
-            return FALSE;
-        }
+        /*
+         * force Content-Type 'text/plain' if not found (eg. empty content message)
+         */
+        $ctype = ($ctype ? $ctype : 'text/plain');
 
         /*
          * on multi-part messages retrive supplied boundary
@@ -3111,36 +3219,12 @@ class rcube_dbmail extends rcube_storage {
                 break;
             }
 
-            // append row to messafe container
-            if ($is_header) {
+            $target = ($is_header ? 'headers' : 'content');
 
-                // header could contain more than one parameter, split row on semicolon (if present)
-                $exploded_row = explode(';', $row);
-
-                foreach ($exploded_row as &$header) {
-
-                    $header = trim($header);
-
-                    if (strlen($header) > 0) {
-
-                        // split by header name / header value
-                        $delimiter = $this->get_header_delimiter($header);
-
-                        $exploded_header = explode($delimiter, $header, 2);
-
-                        if (count($exploded_header) != 2) {
-                            // error 
-                            return FALSE;
-                        }
-
-                        $header_name = $exploded_header[0];
-                        $header_value = $exploded_header[1];
-
-                        $message_parts[$part_index]['headers'][$header_name] = $header_value;
-                    }
-                }
+            if (!array_key_exists($part_index, $message_parts) || !array_key_exists($target, $message_parts[$part_index])) {
+                $message_parts[$part_index][$target] = $row;
             } else {
-                $message_parts[$part_index]['content'][] = $row;
+                $message_parts[$part_index][$target] .= PHP_EOL . $row;
             }
         }
 
@@ -3210,7 +3294,7 @@ class rcube_dbmail extends rcube_storage {
                 . "    0, "
                 . "    '{$this->dbmail->escape($this->create_message_unique_id())}', "
                 . "    0, "
-                . "    0, "
+                . "    0 "
                 . " ) ";
 
         if (!$this->dbmail->query($query)) {
@@ -3218,52 +3302,152 @@ class rcube_dbmail extends rcube_storage {
             return FALSE;
         }
 
-
         /*
          * insert dbmail_header record 
          * (header deduplication aware!!!)
          */
-        foreach ($message_parts[0]['headers'] as $header_name => $header_value) {
+        if (!array_key_exists(0, $message_parts) || !array_key_exists('headers', $message_parts[0])) {
+            // error - no headers found
+            return FALSE;
+        }
 
-            $header_name_id = $this->get_header_id_by_header_name($header_name);
-            if (!$header_name_id) {
+        $headers = $message_parts[0]['headers'];
+        $exploded_headers = explode("\n", $headers);
+        foreach ($exploded_headers as $row) {
 
-                // new header name found - insert record
-                $query = "INSERT INTO dbmail_headername "
-                        . " (headername) "
-                        . " VALUES "
-                        . " '{$this->dbmail->escape($header_name)}' ";
+            // header could contain more than one parameter, split row on semicolon (if present)
+            $exploded_row = explode(';', $row);
 
-                if (!$this->dbmail->query($query)) {
-                    $this->dbmail->rollbackTransaction();
-                    return FALSE;
-                }
+            foreach ($exploded_row as &$header) {
 
-                // retrive header name id
-                $header_name_id = $this->dbmail->insert_id('dbmail_headername');
-                if (!$header_name_id) {
-                    $this->dbmail->rollbackTransaction();
-                    return FALSE;
+                $header = trim($header);
+
+                if (strlen($header) > 0) {
+
+                    // split by header name / header value
+                    $delimiter = $this->get_header_delimiter($header);
+
+                    $exploded_header = explode($delimiter, $header, 2);
+
+                    if (count($exploded_header) != 2) {
+                        // error 
+                        return FALSE;
+                    }
+
+                    $header_name = $exploded_header[0];
+                    $header_value = $exploded_header[1];
+
+                    $header_name_id = $this->get_header_id_by_header_name($header_name);
+                    if (!$header_name_id) {
+
+                        // new header name found - insert record
+                        $query = "INSERT INTO dbmail_headername "
+                                . " ( "
+                                . "     headername "
+                                . " ) "
+                                . " VALUES "
+                                . " ( "
+                                . "     '{$this->dbmail->escape($header_name)}' "
+                                . " ) ";
+
+                        if (!$this->dbmail->query($query)) {
+                            $this->dbmail->rollbackTransaction();
+                            return FALSE;
+                        }
+
+                        // retrive header name id
+                        $header_name_id = $this->dbmail->insert_id('dbmail_headername');
+                        if (!$header_name_id) {
+                            $this->dbmail->rollbackTransaction();
+                            return FALSE;
+                        }
+                    }
+
+                    $header_value_id = $this->get_header_value_id_by_header_value($header_value);
+                    if (!$header_value_id) {
+
+                        // new header value found - insert record
+                        $query = "INSERT INTO dbmail_headervalue "
+                                . " ( "
+                                . "     hash, "
+                                . "     headervalue, "
+                                . "     sortfield, "
+                                . "     datefield "
+                                . " )"
+                                . " VALUES"
+                                . " ( "
+                                . "     '{$this->dbmail->escape(md5($header_value))}', "
+                                . "     '{$this->dbmail->escape($header_value)}', "
+                                . "     '{$this->dbmail->escape($header_value)}', "
+                                . "     NULL "
+                                . " ) ";
+
+                        if (!$this->dbmail->query($query)) {
+                            $this->dbmail->rollbackTransaction();
+                            return FALSE;
+                        }
+
+                        // retrive header value id
+                        $header_value_id = $this->dbmail->insert_id('dbmail_headervalue');
+                        if (!$header_value_id) {
+                            $this->dbmail->rollbackTransaction();
+                            return FALSE;
+                        }
+                    }
+
+                    // headers table record exists?
+                    $query = " SELECT physmessage_id "
+                            . " FROM dbmail_header "
+                            . " WHERE physmessage_id = '{$this->dbmail->escape($physmessage_id)}' "
+                            . " AND headername_id = '{$this->dbmail->escape($header_name_id)}' "
+                            . " AND headervalue_id = '{$this->dbmail->escape($header_value_id)}' ";
+
+                    $res = $this->dbmail->query($query);
+
+                    if ($this->dbmail->num_rows($res) == 0) {
+
+                        // add main headers table record
+                        $query = "INSERT INTO dbmail_header "
+                                . " ( "
+                                . "     physmessage_id, "
+                                . "     headername_id, "
+                                . "     headervalue_id "
+                                . " "
+                                . " )"
+                                . " VALUES "
+                                . " ( "
+                                . "     '{$this->dbmail->escape($physmessage_id)}', "
+                                . "     '{$this->dbmail->escape($header_name_id)}', "
+                                . "     '{$this->dbmail->escape($header_value_id)}' "
+                                . " )";
+
+                        if (!$this->dbmail->query($query)) {
+                            $this->dbmail->rollbackTransaction();
+                            return FALSE;
+                        }
+                    }
                 }
             }
+        }
 
-            $header_value_id = $this->get_header_value_id_by_header_value($header_value);
-            if (!$header_value_id) {
+        foreach ($message_parts as $index => $part_data) {
 
-                // new header value found - insert record
-                $query = "INSERT INTO dbmail_headervalue "
+            $part_key = ($index + 1);
+
+            // headers management
+            if (array_key_exists('headers', $part_data) && strlen($part_data['headers']) > 0) {
+
+                $query = "INSERT INTO dbmail_mimeparts "
                         . " ( "
                         . "     hash, "
-                        . "     headervalue, "
-                        . "     sortfield, "
-                        . "     datefield "
-                        . " )"
-                        . " VALUES"
+                        . "     data, "
+                        . "     size "
+                        . " ) "
+                        . " VALUES "
                         . " ( "
-                        . "     '{$this->dbmail->escape($header_value)}', "
-                        . "     '{$this->dbmail->escape($header_value)}', "
-                        . "     '{$this->dbmail->escape($header_value)}', "
-                        . "     '{$this->dbmail->escape($header_value)}' "
+                        . "     '{$this->dbmail->escape(md5($part_data['headers']))}', "
+                        . "     '{$this->dbmail->escape($part_data['headers'])}', "
+                        . "     '{$this->dbmail->escape(strlen($part_data['headers']))}' "
                         . " ) ";
 
                 if (!$this->dbmail->query($query)) {
@@ -3271,39 +3455,84 @@ class rcube_dbmail extends rcube_storage {
                     return FALSE;
                 }
 
-                // retrive header value id
-                $header_value_id = $this->dbmail->insert_id('dbmail_headervalue');
-                if (!$header_value_id) {
+                // retrive part list header id
+                $header_part_list_id = $this->dbmail->insert_id('dbmail_mimeparts');
+                if (!$header_part_list_id) {
+                    $this->dbmail->rollbackTransaction();
+                    return FALSE;
+                }
+
+                $query = "INSERT INTO dbmail_partlists "
+                        . " ( "
+                        . "    physmessage_id, "
+                        . "    is_header, "
+                        . "    part_key, "
+                        . "    part_depth, "
+                        . "    part_order, "
+                        . "    part_id "
+                        . " ) "
+                        . " VALUES "
+                        . " ( "
+                        . "    '{$this->dbmail->escape($physmessage_id)}', "
+                        . "    '1', "
+                        . "    '{$this->dbmail->escape($part_key)}', "
+                        . "    '0', "
+                        . "    '0', "
+                        . "    '{$this->dbmail->escape($header_part_list_id)}' "
+                        . " ) ";
+
+                if (!$this->dbmail->query($query)) {
                     $this->dbmail->rollbackTransaction();
                     return FALSE;
                 }
             }
 
-            // headers table record exists?
-            $query = " SELECT physmessage_id "
-                    . " FROM dbmail_header "
-                    . " WHERE physmessage_id = '{$this->dbmail->escape($physmessage_id)}' "
-                    . " AND headername_id = '{$this->dbmail->escape($header_name_id)}' "
-                    . " AND headervalue_id = '{$this->dbmail->escape($header_value_id)}' ";
+            // content management
+            if (array_key_exists('content', $part_data) && count($part_data['content']) > 0) {
 
-            $res = $this->dbmail->query($query);
-
-            if ($this->dbmail->num_rows($res) == 0) {
-
-                // add main headers table record
-                $query = "INSERT INTO dbmail_header "
+                $query = "INSERT INTO dbmail_mimeparts "
                         . " ( "
-                        . "     physmessage_id, "
-                        . "     headername_id, "
-                        . "     headervalue_id "
-                        . " "
-                        . " )"
+                        . "     hash, "
+                        . "     data, "
+                        . "     size "
+                        . " ) "
                         . " VALUES "
                         . " ( "
-                        . "     '{$this->dbmail->escape($physmessage_id)}', "
-                        . "     '{$this->dbmail->escape($header_name_id)}', "
-                        . "     '{$this->dbmail->escape($header_value_id)}' "
-                        . " )";
+                        . "     '{$this->dbmail->escape(md5($part_data['content']))}', "
+                        . "     '{$this->dbmail->escape($part_data['content'])}', "
+                        . "     '{$this->dbmail->escape(strlen($part_data['content']))}' "
+                        . " ) ";
+
+                if (!$this->dbmail->query($query)) {
+                    $this->dbmail->rollbackTransaction();
+                    return FALSE;
+                }
+
+                // retrive part list header id
+                $comntent_part_list_id = $this->dbmail->insert_id('dbmail_mimeparts');
+                if (!$comntent_part_list_id) {
+                    $this->dbmail->rollbackTransaction();
+                    return FALSE;
+                }
+
+                $query = "INSERT INTO dbmail_partlists "
+                        . " ( "
+                        . "    physmessage_id, "
+                        . "    is_header, "
+                        . "    part_key, "
+                        . "    part_depth, "
+                        . "    part_order, "
+                        . "    part_id "
+                        . " ) "
+                        . " VALUES "
+                        . " ( "
+                        . "    '{$this->dbmail->escape($physmessage_id)}', "
+                        . "    '0', "
+                        . "    '{$this->dbmail->escape($part_key)}', "
+                        . "    '0', "
+                        . "    '0', "
+                        . "    '{$this->dbmail->escape($comntent_part_list_id)}' "
+                        . " ) ";
 
                 if (!$this->dbmail->query($query)) {
                     $this->dbmail->rollbackTransaction();
@@ -3312,27 +3541,110 @@ class rcube_dbmail extends rcube_storage {
             }
         }
 
-        // $message_parts[$part_index]['headers'][$header_name] = $header_value;
-        // $message_parts[$part_index]['content'][] = $row;
-        // $header_id = $this->get_header_id_by_header_name('content-type');
-        /*
-         *  insert dbmail_headername record
-         */
-        /*
-         *  insert dbmail_headervalue record
-         */
-        /*
-         *  insert dbmail_partlists record
-         */
-        // multi-part content????
-        if (strtoupper(substr($ctype, 0, 9)) == 'multipart') {
-            
-        }
-        /*
-         *  insert dbmail_mimeparts record
-         */
         // return status
         return ($this->dbmail->endTransaction() ? TRUE : FALSE);
+    }
+
+    /**
+     * create raw message from part lists
+     * @param $physmessage_id
+     * @return stdClass
+     */
+    private function fetch_part_lists($physmessage_id) {
+
+        $query = " SELECT dbmail_partlists.part_depth, dbmail_partlists.is_header, dbmail_mimeparts.data "
+                . " FROM dbmail_partlists "
+                . " INNER JOIN dbmail_mimeparts on dbmail_partlists.part_id = dbmail_mimeparts.id "
+                . " WHERE dbmail_partlists.physmessage_id = {$this->dbmail->escape($physmessage_id)} "
+                . " ORDER BY dbmail_partlists.part_key, dbmail_partlists.part_order ASC ";
+
+        $result = $this->dbmail->query($query);
+
+        $mimeParts = [];
+        while ($row = $this->dbmail->fetch_assoc($result)) {
+            $mimeParts[] = $row;
+        }
+
+        $depth = 0;
+        $finalized = false;
+        $is_header = true;
+        $got_boundary = false;
+        $prev_boundary = false;
+        $prev_is_message = false;
+        $is_message = false;
+        $boundary = '';
+        $blist = [];
+        $index = 0;
+        $header = '';
+        $body = '';
+        $newline = "\r\n";
+
+        foreach ($mimeParts as $mimePart) {
+
+            $prevdepth = $depth;
+            $prev_header = $is_header;
+
+            $depth = $mimePart['part_depth'];
+            $is_header = $mimePart['is_header'];
+            $blob = $mimePart['data'];
+
+            if ($is_header) {
+                $prev_boundary = $got_boundary;
+                $prev_is_message = $is_message;
+
+                $is_message = preg_match('~content-type:\s+message/rfc822\b~i', $blob);
+            }
+
+            $got_boundary = false;
+
+            $matches = array();
+            if ($is_header && preg_match('~^content-type:\s+.*;(\r?\n\s.*)*\s+boundary="?([a-z0-9\'()+_,-./:=\?]*)~mi', $blob, $matches)) {
+                list(,, $boundary) = $matches;
+                $got_boundary = true;
+                $blist[$depth] = $boundary;
+            }
+
+            while (($prevdepth > 0) && ($prevdepth - 1 >= $depth) && $blist[$prevdepth - 1]) {
+                $body .= $newline . "--" . $blist[$prevdepth - 1] . "--" . $newline;
+                unset($blist[$prevdepth - 1]);
+                $prevdepth--;
+                $finalized = true;
+            }
+
+
+            if (($depth > 0) && (!empty($blist[$depth - 1]))) {
+                $boundary = $blist[$depth - 1];
+            }
+
+            if ($is_header && (!$prev_header || $prev_boundary || ($prev_header && $depth > 0 && !$prev_is_message))) {
+                if ($prevdepth > 0) {
+                    $body .= $newline;
+                }
+                $body .= "--" . $boundary . $newline;
+            }
+
+            if (!$is_header && $prev_header) {
+                $body .= $newline;
+            }
+
+            if ($is_header && $depth == 0) {
+                $header .= $blob;
+            } else {
+                $body .= $blob;
+            }
+
+            $index++;
+        }
+
+        if ($index > 2 && $boundary && !$finalized) {
+            $body .= $newline . "--" . $boundary . "--" . $newline;
+        }
+
+        $response = new stdClass();
+        $response->header = $header;
+        $response->body = $body;
+
+        return $response;
     }
 
 }
