@@ -977,6 +977,8 @@ class rcube_dbmail extends rcube_storage {
         // add 'part_key' property to each part (pass by reference)
         $this->set_part_keys($mime_decoded, 1);
 
+        console($mime_decoded);
+
         /*
          * start transaction
          */
@@ -1089,7 +1091,6 @@ class rcube_dbmail extends rcube_storage {
 
         // format target message UIDs
         $message_uids = $this->list_message_UIDs($uids, $from);
-
         if (!$message_uids) {
             return FALSE;
         }
@@ -1107,7 +1108,7 @@ class rcube_dbmail extends rcube_storage {
                     . " SET mailbox_idnr = {$this->dbmail->escape($to_mailbox_idnr)} "
                     . " WHERE message_idnr = {$this->dbmail->escape($message_uid)}";
 
-            if (!$this->dbmail->query($query) || $this->increment_message_seq($message_uid)) {
+            if (!$this->dbmail->query($query) || !$this->increment_message_seq($message_uid)) {
                 $this->dbmail->rollbackTransaction();
                 return FALSE;
             }
@@ -2357,7 +2358,7 @@ class rcube_dbmail extends rcube_storage {
      * @param int $physmessage_id
      * @return array 
      */
-    protected function get_headers($physmessage_id) {
+    protected function get_physmessage_headers($physmessage_id) {
 
         $query = "SELECT dbmail_mimeparts.data "
                 . " FROM dbmail_partlists "
@@ -3086,8 +3087,8 @@ class rcube_dbmail extends rcube_storage {
             $deleted = $msg['deleted_flag'];
             $flagged = $msg['flagged_flag'];
 
-            $message_headers = $this->get_headers($physmessage_id);
-                       
+            $message_headers = $this->get_physmessage_headers($physmessage_id);
+
             $rcmh = new rcube_message_header();
 
             $rcmh->id = $msg_index;
