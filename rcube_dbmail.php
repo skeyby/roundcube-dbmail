@@ -597,7 +597,43 @@ class rcube_dbmail extends rcube_storage {
      * @return rcube_result_index  Search result (UIDs)
      */
     public function search_once($folder = null, $str = 'ALL') {
-        // TO DO!!!!
+
+        // normalize target folder/s
+        if (is_array($folder) && count($folder) > 0) {
+            $folders = $folder;
+        } elseif (strlen($folder) == 0) {
+            $folders = array($folder);
+        } else {
+            $folders = array($this->folder);
+        }
+
+        // extract folders id
+        $mail_box_idnr_list = array();
+        foreach ($folders as $folder_name) {
+            $mail_box_idnr = $this->get_mail_box_id($folder_name);
+            if ($mail_box_idnr) {
+                $mail_box_idnr_list[] = $mail_box_idnr;
+            }
+        }
+
+        // format search conditions
+        $search_conditions = $this->format_search_parameters($str);
+
+        // get messages list
+        $result_index_str = "";
+        $messages = $this->_list_messages($folder, 0, NULL, 'ASC', 0, $search_conditions);
+        foreach ($messages as $message) {
+            $result_index_str .= " {$message->uid}";
+        }
+
+        $index = new rcube_result_index($folder, "* SORT {$result_index_str}");
+
+        $this->search_set = array(
+            $str,
+            $index
+        );
+
+        return $index;
     }
 
     /**
@@ -752,26 +788,12 @@ class rcube_dbmail extends rcube_storage {
         $physmessage_id = $message_record['physmessage_id'];
         $mime = $this->fetch_part_lists($physmessage_id);
 
-        $mime_decode = new Mail_mimeDecode($mime->header . $mime->body);
+        $mime_decoded = $this->decode_raw_message($mime->header . $mime->body);
+        if (!$mime_decoded) {
+            return FALSE;
+        }
 
-        $decode_params = array(
-            'include_bodies' => TRUE,
-            'decode_bodies' => TRUE,
-            'decode_headers' => TRUE,
-            'rfc_822bodies' => TRUE
-        );
-
-        /*
-         * add error suppression to avoid "Deprecated:  preg_replace(): The /e modifier 
-         * is deprecated, use preg_replace_callback instead in 
-         * ..../roundcube/vendor/pear-pear.php.net/Mail_mimeDecode/Mail/mimeDecode.php on line 762"
-         */
-        $decoded = @$mime_decode->decode($decode_params);
-
-        // add mime_id attributes to '$decoded' array items (pass by reference)
-        $mime_decode->getMimeNumbers($decoded);
-
-        return $this->get_message_part_body($decoded, $part);
+        return $this->get_message_part_body($mime_decoded, $part);
     }
 
     /**
@@ -927,35 +949,6 @@ class rcube_dbmail extends rcube_storage {
      */
     public function save_message($folder, &$message, $headers = '', $is_file = false, $flags = array(), $date = null) {
 
-        // destination folder exists?
-        $mailbox_idnr = $this->get_mail_box_id($folder);
-        if (!$mailbox_idnr) {
-            return FALSE;
-        }
-
-        $mime_decode = new Mail_mimeDecode($message);
-
-        $decode_params = array(
-            'include_bodies' => TRUE,
-            'decode_bodies' => TRUE,
-            'decode_headers' => TRUE,
-            'rfc_822bodies' => TRUE
-        );
-
-        /*
-         * add error suppression to avoid "Deprecated:  preg_replace(): The /e modifier 
-         * is deprecated, use preg_replace_callback instead in 
-         * ..../roundcube/vendor/pear-pear.php.net/Mail_mimeDecode/Mail/mimeDecode.php on line 762"
-         */
-        $decoded = @$mime_decode->decode($decode_params);
-
-        // add mime_id attributes to '$decoded' array items (pass by reference)
-        $mime_decode->getMimeNumbers($decoded);
-
-
-
-
-
         /*
          * TO DO!!!!!!!!!!
          * 
@@ -970,6 +963,19 @@ class rcube_dbmail extends rcube_storage {
          * - dbmail_headervalue.datefield
          */
 
+        // destination folder exists?
+        $mailbox_idnr = $this->get_mail_box_id($folder);
+        if (!$mailbox_idnr) {
+            return FALSE;
+        }
+
+        $mime_decoded = $this->decode_raw_message($message);
+        if (!$mime_decoded) {
+            return FALSE;
+        }
+
+        // add 'part_key' property to each part (pass by reference)
+        $this->set_part_keys($mime_decoded, 1);
 
         /*
          * start transaction
@@ -1045,8 +1051,17 @@ class rcube_dbmail extends rcube_storage {
             return FALSE;
         }
 
+        /*
+         * retrive message_idnr
+         */
+        $message_idnr = $this->dbmail->insert_id('dbmail_messages');
+        if (!$message_idnr) {
+            $this->dbmail->rollbackTransaction();
+            return FALSE;
+        }
+
         // save part list
-        if (!$this->save_message_part($physmessage_id, $decoded)) {
+        if (!$this->save_message_part($physmessage_id, $mime_decoded)) {
             $this->dbmail->rollbackTransaction();
             return FALSE;
         }
@@ -2337,27 +2352,48 @@ class rcube_dbmail extends rcube_storage {
         return $sub_folders;
     }
 
+    /**
+     * retrive message headers from 'dbmail_mimeparts'
+     * @param int $physmessage_id
+     * @return array 
+     */
     protected function get_headers($physmessage_id) {
 
-        $headers = array();
-
-        $query = " SELECT dbmail_headername.headername, dbmail_headervalue.headervalue "
-                . " FROM dbmail_header "
-                . " INNER JOIN dbmail_headername ON dbmail_header.headername_id = dbmail_headername.id "
-                . " INNER JOIN dbmail_headervalue ON dbmail_header.headervalue_id = dbmail_headervalue.id "
-                . " WHERE dbmail_header.physmessage_id = {$this->dbmail->escape($physmessage_id)} ";
+        $query = "SELECT dbmail_mimeparts.data "
+                . " FROM dbmail_partlists "
+                . " INNER JOIN dbmail_mimeparts ON dbmail_partlists.part_id = dbmail_mimeparts.id "
+                . " WHERE dbmail_partlists.physmessage_id = {$this->dbmail->escape($physmessage_id)} "
+                . " AND dbmail_partlists.is_header = 1 "
+                . " AND dbmail_partlists.part_depth = 0 ";
 
         $res = $this->dbmail->query($query);
 
-        while ($row = $this->dbmail->fetch_assoc($res)) {
-
-            $headername = $row['headername'];
-            $headervalue = $row['headervalue'];
-
-            $headers[$headername] = $headervalue;
+        if ($this->dbmail->num_rows($res) == 0) {
+            return array();
         }
 
-        return $headers;
+        $row = $this->dbmail->fetch_assoc($res);
+
+        $mime_decode = new Mail_mimeDecode(trim($row['data']));
+
+        $decode_params = array(
+            'include_bodies' => TRUE,
+            'decode_bodies' => TRUE,
+            'decode_headers' => TRUE,
+            'rfc_822bodies' => TRUE
+        );
+
+        /*
+         * add error suppression to avoid "Deprecated:  preg_replace(): The /e modifier 
+         * is deprecated, use preg_replace_callback instead in 
+         * ..../roundcube/vendor/pear-pear.php.net/Mail_mimeDecode/Mail/mimeDecode.php on line 762"
+         */
+        $mime_decoded = @$mime_decode->decode($decode_params);
+
+        // add mime_id attributes to '$mime_decoded' array items (pass by reference)
+        $mime_decode->getMimeNumbers($mime_decoded);
+
+        return $mime_decoded->headers;
     }
 
     /**
@@ -2533,28 +2569,12 @@ class rcube_dbmail extends rcube_storage {
         $rcmh->flags["DELETED"] = ($message_metadata['deleted_flag'] == 1 ? TRUE : FALSE);
         $rcmh->flags["FLAGGED"] = ($message_metadata['flagged_flag'] == 1 ? TRUE : FALSE);
 
-        $mime_decode = new Mail_mimeDecode($mime->header . $mime->body);
+        $mime_decoded = $this->decode_raw_message($mime->header . $mime->body);
+        if (!$mime_decoded) {
+            return FALSE;
+        }
 
-        //file_put_contents('/Users/sgironella/Sites/gcloud-webmail/roundcube/logs/raw_message.txt', $mime->header . "\r\n" . $mime->body);
-
-        $decode_params = array(
-            'include_bodies' => TRUE,
-            'decode_bodies' => TRUE,
-            'decode_headers' => TRUE,
-            'rfc_822bodies' => TRUE
-        );
-
-        /*
-         * add error suppression to avoid "Deprecated:  preg_replace(): The /e modifier 
-         * is deprecated, use preg_replace_callback instead in 
-         * ..../roundcube/vendor/pear-pear.php.net/Mail_mimeDecode/Mail/mimeDecode.php on line 762"
-         */
-        $decoded = @$mime_decode->decode($decode_params);
-
-        // add mime_id attributes to '$decoded' array items (pass by reference)
-        $mime_decode->getMimeNumbers($decoded);
-
-        $rcmh->structure = $this->get_structure($decoded);
+        $rcmh->structure = $this->get_structure($mime_decoded);
 
         //$rcmh->bodystructure = $this->get_bodystructure($decoded);
 
@@ -3023,8 +3043,8 @@ class rcube_dbmail extends rcube_storage {
                 $header_id = $this->get_header_id_by_header_name($sort_field);
 
                 $additional_joins .= " "
-                        . " INNER JOIN dbmail_header AS sort_dbmail_header ON dbmail_physmessage.id = sort_dbmail_header.physmessage_id AND sort_dbmail_header.headername_id = {$this->dbmail->escape($header_id)} "
-                        . " INNER JOIN dbmail_headervalue AS sort_dbmail_headervalue ON sort_dbmail_header.headervalue_id = sort_dbmail_headervalue.id ";
+                        . " LEFT JOIN dbmail_header AS sort_dbmail_header ON dbmail_physmessage.id = sort_dbmail_header.physmessage_id AND sort_dbmail_header.headername_id = {$this->dbmail->escape($header_id)} "
+                        . " LEFT JOIN dbmail_headervalue AS sort_dbmail_headervalue ON sort_dbmail_header.headervalue_id = sort_dbmail_headervalue.id ";
 
                 $sort_condition = " ORDER BY sort_dbmail_headervalue.sortfield {$this->dbmail->escape($sort_order)} ";
                 break;
@@ -3067,7 +3087,7 @@ class rcube_dbmail extends rcube_storage {
             $flagged = $msg['flagged_flag'];
 
             $message_headers = $this->get_headers($physmessage_id);
-
+                       
             $rcmh = new rcube_message_header();
 
             $rcmh->id = $msg_index;
@@ -3100,11 +3120,171 @@ class rcube_dbmail extends rcube_storage {
         return $headers;
     }
 
+    /**
+     * Decode supplied raw message using library PEAR Mail_mimeDecode
+     * @param string $raw_message
+     * @return Mail_mimeDecode
+     */
+    private function decode_raw_message($raw_message) {
+
+        $mime_decode = new Mail_mimeDecode($raw_message);
+
+        $decode_params = array(
+            'include_bodies' => TRUE,
+            'decode_bodies' => TRUE,
+            'decode_headers' => TRUE,
+            'rfc_822bodies' => TRUE
+        );
+
+        /*
+         * add error suppression to avoid "Deprecated:  preg_replace(): The /e modifier 
+         * is deprecated, use preg_replace_callback instead in 
+         * ..../roundcube/vendor/pear-pear.php.net/Mail_mimeDecode/Mail/mimeDecode.php on line 762"
+         */
+        $decoded = @$mime_decode->decode($decode_params);
+
+        // add mime_id attributes to '$decoded' array items (pass by reference)
+        $mime_decode->getMimeNumbers($decoded);
+
+        return $decoded;
+    }
+
     private function save_message_part($physmessage_id, $mime_decoded, $depth = 0) {
 
-        // TO DO!!!!!!
-        return FALSE;
+        /*
+         * TO DO!!!!!!!!!!
+         * 
+         * fix values for:
+         * - dbmail_physmessage.messagesize
+         * - dbmail_physmessage.rfcsize
+         * - dbmail_partlists.part_depth
+         * - dbmail_partlists.part_order
+         * - dbmail_mimeparts.hash
+         * - dbmail_headervalue.hash
+         * - dbmail_headervalue.sortfield
+         * - dbmail_headervalue.datefield
+         */
 
+
+        if (property_exists($mime_decoded, 'parts')) {
+
+            $children_depth = ($depth + 1);
+
+            foreach ($mime_decoded->parts as $part) {
+
+                if (!$this->save_message_part($physmessage_id, $part, $children_depth)) {
+                    // error - break loop
+                    return FALSE;
+                }
+            }
+        }
+
+
+        if (property_exists($mime_decoded, 'headers')) {
+
+            $headers = '';
+            foreach ($mime_decoded->headers as $header_name => $header_value) {
+                $headers .= $header_name . $this->get_header_delimiter($header_name) . $header_value . "\n";
+            }
+
+            $query = "INSERT INTO dbmail_mimeparts "
+                    . " ( "
+                    . "     hash, "
+                    . "     data, "
+                    . "     size "
+                    . " ) "
+                    . " VALUES "
+                    . " ( "
+                    . "     '{$this->dbmail->escape(md5($headers))}', "
+                    . "     '{$this->dbmail->escape($headers)}', "
+                    . "     '{$this->dbmail->escape(strlen($headers))}' "
+                    . " ) ";
+
+            if (!$this->dbmail->query($query)) {
+                return FALSE;
+            }
+
+            // retrive part list header id
+            $header_part_list_id = $this->dbmail->insert_id('dbmail_mimeparts');
+            if (!$header_part_list_id) {
+                return FALSE;
+            }
+
+            $query = "INSERT INTO dbmail_partlists "
+                    . " ( "
+                    . "    physmessage_id, "
+                    . "    is_header, "
+                    . "    part_key, "
+                    . "    part_depth, "
+                    . "    part_order, "
+                    . "    part_id "
+                    . " ) "
+                    . " VALUES "
+                    . " ( "
+                    . "    '{$this->dbmail->escape($physmessage_id)}', "
+                    . "    '1', "
+                    . "    '{$this->dbmail->escape($mime_decoded->header_part_key)}', "
+                    . "    '0', "
+                    . "    '0', "
+                    . "    '{$this->dbmail->escape($header_part_list_id)}' "
+                    . " ) ";
+
+            if (!$this->dbmail->query($query)) {
+                return FALSE;
+            }
+        }
+
+
+        if (property_exists($mime_decoded, 'body')) {
+
+            $query = "INSERT INTO dbmail_mimeparts "
+                    . " ( "
+                    . "     hash, "
+                    . "     data, "
+                    . "     size "
+                    . " ) "
+                    . " VALUES "
+                    . " ( "
+                    . "     '{$this->dbmail->escape(md5($mime_decoded->body))}', "
+                    . "     '{$this->dbmail->escape($mime_decoded->body)}', "
+                    . "     '{$this->dbmail->escape(strlen($mime_decoded->body))}' "
+                    . " ) ";
+
+            if (!$this->dbmail->query($query)) {
+                return FALSE;
+            }
+
+            // retrive part list body id
+            $body_part_list_id = $this->dbmail->insert_id('dbmail_mimeparts');
+            if (!$body_part_list_id) {
+                return FALSE;
+            }
+
+            $query = "INSERT INTO dbmail_partlists "
+                    . " ( "
+                    . "    physmessage_id, "
+                    . "    is_header, "
+                    . "    part_key, "
+                    . "    part_depth, "
+                    . "    part_order, "
+                    . "    part_id "
+                    . " ) "
+                    . " VALUES "
+                    . " ( "
+                    . "    '{$this->dbmail->escape($physmessage_id)}', "
+                    . "    '0', "
+                    . "    '{$this->dbmail->escape($mime_decoded->body_part_key)}', "
+                    . "    '0', "
+                    . "    '0', "
+                    . "    '{$this->dbmail->escape($body_part_list_id)}' "
+                    . " ) ";
+
+            if (!$this->dbmail->query($query)) {
+                return FALSE;
+            }
+        }
+
+        return TRUE;
     }
 
     /**
@@ -3345,16 +3525,22 @@ class rcube_dbmail extends rcube_storage {
         return $response;
     }
 
-    private function get_message_part_body($mimeDecoded, $mime_id) {
+    /**
+     * Return passed mime part
+     * @param stdClass $mime_decoded
+     * @param string $mime_id
+     * @return stdClass on success, False if not found
+     */
+    private function get_message_part_body($mime_decoded, $mime_id) {
 
         $response = FALSE;
 
-        if (property_exists($mimeDecoded, 'mime_id') && $mimeDecoded->mime_id == $mime_id) {
+        if (property_exists($mime_decoded, 'mime_id') && $mime_decoded->mime_id == $mime_id) {
             // found
-            $response = (property_exists($mimeDecoded, 'body') ? $mimeDecoded->body : FALSE);
-        } elseif (property_exists($mimeDecoded, 'parts')) {
+            $response = (property_exists($mime_decoded, 'body') ? $mime_decoded->body : FALSE);
+        } elseif (property_exists($mime_decoded, 'parts')) {
             // fetch children
-            foreach ($mimeDecoded->parts as $part) {
+            foreach ($mime_decoded->parts as $part) {
 
                 $response = $this->get_message_part_body($part, $mime_id);
 
@@ -3366,6 +3552,34 @@ class rcube_dbmail extends rcube_storage {
         }
 
         return $response;
+    }
+
+    /**
+     * Set part_key on supplied part list items (nested) to treat it like a flat array
+     * @param stdClass $mime_decoded
+     * @return stdClass
+     */
+    private function set_part_keys(&$mime_decoded, $part_key) {
+
+        if (property_exists($mime_decoded, 'headers')) {
+            $mime_decoded->header_part_key = $part_key;
+            $part_key++;
+        }
+
+        if (property_exists($mime_decoded, 'body')) {
+            $mime_decoded->body_part_key = $part_key;
+            $part_key++;
+        }
+
+        if (property_exists($mime_decoded, 'parts')) {
+
+            foreach ($mime_decoded->parts as &$part) {
+
+                $part_key = $this->set_part_keys($part, $part_key);
+            }
+        }
+
+        return $part_key;
     }
 
 }
