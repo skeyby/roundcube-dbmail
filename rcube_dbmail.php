@@ -1972,7 +1972,24 @@ class rcube_dbmail extends rcube_storage {
      * @return mixed Quota info or False if not supported
      */
     public function get_quota($folder = null) {
-        // TO DO!!!!
+
+            $query = "SELECT curmail_size, maxmail_size "
+                   . "  FROM dbmail_users "
+                   . " WHERE user_idnr = {$this->dbmail->escape($this->user_idnr)} ";
+
+		$res = $this->dbmail->query($query);
+		$row = $this->dbmail->fetch_assoc($res);
+
+		$used = $row["curmail_size"];
+		$total = $row["maxmail_size"];
+
+		$result['used']    = $used;
+		$result['total']   = $total;
+		$result['percent'] = min(100, round(($used/max(1,$total))*100));
+		$result['free']    = 100 - $result['percent'];
+
+		return $result;
+
     }
 
     /* -----------------------------------------
