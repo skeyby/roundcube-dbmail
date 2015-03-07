@@ -1260,7 +1260,37 @@ class rcube_dbmail extends rcube_storage {
      * @return boolean True on success, False on error
      */
     public function expunge_message($uids, $folder = null, $clear_cache = true) {
-        // TO DO!!!!!!!
+
+        if (!strlen($folder)) {
+            $folder = $this->folder;
+        }
+
+        // format supplied message UIDs list - THIRD PARAMETER enable deleted_flag check
+        $message_uids = $this->list_message_UIDs($uids, $folder, TRUE);
+        if (!$message_uids) {
+            return FALSE;
+        }
+
+        // start transaction
+        if (!$this->dbmail->startTransaction()) {
+            return FALSE;
+        }
+
+        foreach ($message_uids as $message_uid) {
+
+            $query = "DELETE FROM dbmail_messages "
+                    . " WHERE message_idnr = {$this->dbmail->escape($message_uid)} "
+		    . " AND deleted_flag = 1";  // Just a double check, list_message_should return only deleted ones
+
+            if (!$this->dbmail->query($query)) {
+                // rollbalk transaction
+                $this->dbmail->rollbackTransaction();
+                return FALSE;
+            }
+        }
+
+        return ($this->dbmail->endTransaction() ? TRUE : FALSE);
+
     }
 
     /**
@@ -2641,7 +2671,7 @@ class rcube_dbmail extends rcube_storage {
      *
      * @return array message UIDs list on success, False on failure
      */
-    protected function list_message_UIDs($uids, $folder = '') {
+    protected function list_message_UIDs($uids, $folder = '', $onlyDeleted = FALSE) {
 
         $message_UIDs = array();
 
@@ -2653,6 +2683,10 @@ class rcube_dbmail extends rcube_storage {
             $query = "SELECT message_idnr "
                     . " FROM dbmail_messages "
                     . " WHERE mailbox_idnr = '{$this->dbmail->escape($mailbox_idnr)}'";
+
+	    if ($onlyDeleted == TRUE) {
+		$query = $query." AND deleted_flag = 1";
+		}
 
             $res = $this->dbmail->query($query);
 
