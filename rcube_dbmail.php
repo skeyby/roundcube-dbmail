@@ -28,6 +28,14 @@ class rcube_dbmail extends rcube_storage {
     private $err_str = '';
     private $response_code = null;
 
+    const MESSAGE_STATUS_NEW     = 0;
+    const MESSAGE_STATUS_SEEN    = 1;
+    const MESSAGE_STATUS_DELETE  = 2;
+    const MESSAGE_STATUS_PURGE   = 3;
+    const MESSAGE_STATUS_UNUSED  = 4;
+    const MESSAGE_STATUS_INSERT  = 5;
+    const MESSAGE_STATUS_ERROR   = 6;
+
     public function __construct() {
 
         // get main roundcube instance
@@ -944,10 +952,26 @@ class rcube_dbmail extends rcube_storage {
      * @param boolean      $is_file True if $message is a filename
      * @param array        $flags   Message flags
      * @param mixed        $date    Message internal date
+     * @ref   dm_message.c - function dbmail_message_store()
      *
      * @return int|bool Appended message UID or True on success, False on error
      */
     public function save_message($folder, &$message, $headers = '', $is_file = false, $flags = array(), $date = null) {
+
+        /*
+
+            Function general outline               
+
+            1 Find folder                          - function db_find_create_mailbox
+            2 Create physical message  (Dedup??)   - function insert_physmessage
+            3 Create (logical) message (step == 0) - function _message_insert
+            4 Save message parts       (step == 2) - function dm_message_store
+            5 Update USER Quota        (step == 1) - function _update_message
+            6 Update headers cache     (step == 3) - function dbmail_message_cache_headers
+            7 Update envelope cache                - function dbmail_message_cache_envelope
+
+        */
+
 
         /*
          * TO DO!!!!!!!!!!
@@ -963,11 +987,23 @@ class rcube_dbmail extends rcube_storage {
          * - dbmail_headervalue.datefield
          */
 
-        // destination folder exists?
-        $mailbox_idnr = $this->get_mail_box_id($folder);
-        if (!$mailbox_idnr) {
-            return FALSE;
+
+        // Current implementation based on original dbmail_message_store
+
+        if (! $this->dbmail->startTransaction()) return FALSE;
+
+        $messageID = $this->_message_insert($message, $this->user_idnr, $folder, $this->create_message_unique_id());
+
+        if ($messageID === FALSE) {
+            $this->dbmail->rollbackTransaction();
+            return FALSE
         }
+
+        $this->dm_quota_user_inc($this->user_idnr, strlen($message));
+
+        
+
+        // 3 Create Logical message
 
         $mime_decoded = $this->decode_raw_message($message);
         if (!$mime_decoded) {
@@ -1220,6 +1256,8 @@ class rcube_dbmail extends rcube_storage {
      */
     public function delete_message($uids, $folder = null) {
 
+        /* User QUOTA update is missing! */
+
         if (!strlen($folder)) {
             $folder = $this->folder;
         }
@@ -1261,6 +1299,8 @@ class rcube_dbmail extends rcube_storage {
      */
     public function expunge_message($uids, $folder = null, $clear_cache = true) {
 
+        /* User QUOTA update is missing! */
+
         if (!strlen($folder)) {
             $folder = $this->folder;
         }
@@ -1280,7 +1320,7 @@ class rcube_dbmail extends rcube_storage {
 
             $query = "DELETE FROM dbmail_messages "
                     . " WHERE message_idnr = {$this->dbmail->escape($message_uid)} "
-		    . " AND deleted_flag = 1";  // Just a double check, list_message_should return only deleted ones
+                    . " AND deleted_flag = 1";  // Just a double check, list_message_should return only deleted ones
 
             if (!$this->dbmail->query($query)) {
                 // rollbalk transaction
@@ -1973,20 +2013,28 @@ class rcube_dbmail extends rcube_storage {
      */
     public function get_quota($folder = null) {
 
-            $query = "SELECT curmail_size, maxmail_size "
-                   . "  FROM dbmail_users "
-                   . " WHERE user_idnr = {$this->dbmail->escape($this->user_idnr)} ";
+        $query = "SELECT curmail_size, maxmail_size, cursieve_size, maxsieve_size"
+               . "  FROM dbmail_users "
+               . " WHERE user_idnr = {$this->dbmail->escape($this->user_idnr)} ";
 
 		$res = $this->dbmail->query($query);
 		$row = $this->dbmail->fetch_assoc($res);
 
-		$used = $row["curmail_size"];
-		$total = $row["maxmail_size"];
+		$used  = intval($row["curmail_size"]);
+		$total = intval($row["maxmail_size"]);
+        $sieveused  = intval($row["cursieve_size"]);
+        $sievetotal = intval($row["maxsieve_size"]);
 
 		$result['used']    = $used;
 		$result['total']   = $total;
 		$result['percent'] = min(100, round(($used/max(1,$total))*100));
 		$result['free']    = 100 - $result['percent'];
+
+        /* This is creative hack to show both configurable infos for dbmail */
+        $result['all']["Messages"]["storage"]["used"] = $used;
+        $result['all']["Messages"]["storage"]["total"] = $total;
+        $result['all']["Rules"]["storage"]["used"] = $sieveused;
+        $result['all']["Rules"]["storage"]["total"] = $sievetotal;
 
 		return $result;
 
@@ -2451,7 +2499,7 @@ class rcube_dbmail extends rcube_storage {
 
         $match = array('boundary', 'filename', 'x-unix-mode', 'name', 'charset', 'format', 'size');
 
-        $delimiter = ":";
+        $delimiter = ": ";
         foreach ($match as $item) {
             if (strtoupper(substr($token, 0, strlen($item))) == strtoupper($item)) {
                 $delimiter = "=";
@@ -3236,6 +3284,21 @@ class rcube_dbmail extends rcube_storage {
 
             $headers = '';
             foreach ($mime_decoded->headers as $header_name => $header_value) {
+
+                // Headers have a specific CASE-matching rule...
+                if (strtolower($header_name) == "from") $header_name = "From";
+                if (strtolower($header_name) == "to") $header_name = "To";
+                if (strtolower($header_name) == "cc") $header_name = "Cc";
+                if (strtolower($header_name) == "bcc") $header_name = "Bcc";
+                if (strtolower($header_name) == "organization") $header_name = "Organization";
+                if (strtolower($header_name) == "subject") $header_name = "Subject";
+                if (strtolower($header_name) == "date") $header_name = "Date";
+                if (strtolower($header_name) == "content-type") $header_name = "Content-Type";
+                if (strtolower($header_name) == "mime-version") $header_name = "MIME-Version";
+                if (strtolower($header_name) == "message-id") $header_name = "Message-ID";
+                if (strtolower($header_name) == "x-sender") $header_name = "X-Sender";
+                if (strtolower($header_name) == "user-agent") $header_name = "User-Agent";
+
                 $headers .= $header_name . $this->get_header_delimiter($header_name) . $header_value . "\n";
             }
 
@@ -3289,6 +3352,10 @@ class rcube_dbmail extends rcube_storage {
 
         if (property_exists($mime_decoded, 'body')) {
 
+//          Not neededed, the message is getting a 8bit header
+//          $body = quoted_printable_encode($mime_decoded->body);
+            $body = $mime_decoded->body;
+
             $query = "INSERT INTO dbmail_mimeparts "
                     . " ( "
                     . "     hash, "
@@ -3297,9 +3364,9 @@ class rcube_dbmail extends rcube_storage {
                     . " ) "
                     . " VALUES "
                     . " ( "
-                    . "     '{$this->dbmail->escape(md5($mime_decoded->body))}', "
-                    . "     '{$this->dbmail->escape($mime_decoded->body)}', "
-                    . "     '{$this->dbmail->escape(strlen($mime_decoded->body))}' "
+                    . "     '{$this->dbmail->escape(   md5($body))}', "
+                    . "     '{$this->dbmail->escape(       $body)}', "
+                    . "     '{$this->dbmail->escape(strlen($body))}'  "
                     . " ) ";
 
             if (!$this->dbmail->query($query)) {
@@ -3632,6 +3699,91 @@ class rcube_dbmail extends rcube_storage {
         }
 
         return $part_key;
+    }
+
+
+    /** Functions ported from DBMAIL -- with direct reference to original names **/
+
+
+    /**
+     * Insert a physical message into the database
+     * 
+     * @ref static void insert_physmessage(DbmailMessage *self, Connection_T c)
+     * @param string $DbmailMessage The message to insert
+     * 
+     * @return int $physmessageID  the inserted message ID of FALSE on error
+     */
+    private function insert_physmessage($DbmailMessage) {
+
+        $query = "INSERT INTO dbmail_physmessage SET "
+                . "    messagesize   = " . strlen($DbmailMessage) . ", "
+                . "    rfcsize       = " . strlen($DbmailMessage) . ", "
+                . "    internal_date = NOW()";
+
+        if    (!$this->dbmail->query($query))   return FALSE;
+        else                                    return $this->dbmail->insert_id('dbmail_physmessage');
+
+    }
+
+
+    /**
+     * Insert a logical message into the database
+     *
+     * @ref int _message_insert(DbmailMessage *self, uint64_t user_idnr, const char *mailbox, const char *unique_id)
+     * @param string $DbmailMessage The message to insert
+     * @param int $user_idnr User ID
+     * @param string $mailbox The destination folder name
+     * @param string $unique_id The unique id to use for this message
+     * 
+     * @return int $messageID the inserted message id or FALSE on error
+     */
+    private function _message_insert($DbmailMessage, $user_idnr, $mailbox, $unique_id) {
+
+
+        // 1 Find Folder
+        $mailbox_idnr = $this->get_mail_box_id($mailbox);
+        if (! $mailbox_idnr) return FALSE;
+
+        // 2 Create Physical message
+        $physmessage_id = $this->insert_physmessage($message);
+        if ($physmessage_id === FALSE) return FALSE;
+
+        $query = "INSERT INTO dbmail_messages SET "
+                . "     mailbox_idnr = "   . $mailbox_idnr   . ", "
+                . "     physmessage_id = " . $physmessage_id . ", "
+                . "     unique_id = "      . $unique_id      . ", "
+                . "     recent_flag = 1, "
+                . "     status = "         . SELF::MESSAGE_STATUS_NEW;
+
+        if    (!$this->dbmail->query($query))   return FALSE;
+        else                                    return $this->dbmail->insert_id('dbmail_physmessage');
+
+
+    }
+
+
+    private function dm_message_store($message) {
+
+        
+    }
+
+
+    private function dm_quota_user_inc($user_idnr, $size) {
+
+        $query = "UPDATE dbmail_users SET curmail_size = curmail_size + " . $size . " WHERE user_idnr = " . $user_idnr;
+
+        if    (!$this->dbmail->query($query))   return FALSE;
+        else                                    return TRUE;
+
+    }
+
+    private function dm_quota_user_dec($user_idnr, $size) {
+
+        $query = "UPDATE dbmail_users SET curmail_size = CASE WHEN curmail_size >= " . $size . " THEN curmail_size - " . $size . " ELSE 0 END WHERE user_idnr = " . $user_idnr;
+
+        if    (!$this->dbmail->query($query))   return FALSE;
+        else                                    return TRUE;
+
     }
 
 }
