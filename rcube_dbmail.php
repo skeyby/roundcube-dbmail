@@ -837,7 +837,27 @@ class rcube_dbmail extends rcube_storage {
      * @return string Message headers string
      */
     public function get_raw_headers($uid) {
-        // TO DO!!!!!!
+
+        // retrive message record
+        $message_metadata = $this->get_message_record($uid);
+        if (!$message_metadata) return FALSE;
+
+        $query = "SELECT dm.* FROM dbmail_partlists dp, dbmail_mimeparts dm
+                    WHERE dp.physmessage_id = ".$message_metadata['physmessage_id']." 
+                    AND   dp.is_header  = 1
+                    AND   dp.part_depth = 0
+                    AND   dm.id = dp.part_id";
+
+        console($query);
+
+        $result = $this->dbmail->query($query);
+
+        if ($result === FALSE) return FALSE;
+
+        $row = $this->dbmail->fetch_assoc($result);
+
+        return $row["data"];
+
     }
 
     /**
@@ -996,12 +1016,12 @@ class rcube_dbmail extends rcube_storage {
 
         if ($messageID === FALSE) {
             $this->dbmail->rollbackTransaction();
-            return FALSE
+            return FALSE;
         }
 
         $this->dm_quota_user_inc($this->user_idnr, strlen($message));
 
-        
+
 
         // 3 Create Logical message
 
