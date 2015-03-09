@@ -10,6 +10,7 @@
  * 2. add the following lines to roundcube/config/config.inc.php
  *    $config['storage_driver'] = 'dbmail';
  *    $config['dbmail_dsn'] = 'mysql://user:pass@host/db'; # dsn connection string
+ *    $config['dbmail_hash'] = 'sha1'; # hashing method to use, must coincide with dbmail.conf - sha1, md5, sha256, sha512, whirlpool. sha1 is the default
  *    $config['dbmail_add_headername'] = FALSE; # add new headernames (if not exists) in 'dbmail_headername' when saving messages
  * 
  * !!! IMPORTANT !!!
@@ -848,8 +849,6 @@ class rcube_dbmail extends rcube_storage {
                     AND   dp.part_depth = 0
                     AND   dm.id = dp.part_id";
 
-        console($query);
-
         $result = $this->dbmail->query($query);
 
         if ($result === FALSE) return FALSE;
@@ -992,137 +991,37 @@ class rcube_dbmail extends rcube_storage {
 
         */
 
-
-        /*
-         * TO DO!!!!!!!!!!
-         * 
-         * fix values for:
-         * - dbmail_physmessage.messagesize
-         * - dbmail_physmessage.rfcsize
-         * - dbmail_partlists.part_depth
-         * - dbmail_partlists.part_order
-         * - dbmail_mimeparts.hash
-         * - dbmail_headervalue.hash
-         * - dbmail_headervalue.sortfield
-         * - dbmail_headervalue.datefield
-         */
-
-
         // Current implementation based on original dbmail_message_store
 
         if (! $this->dbmail->startTransaction()) return FALSE;
 
-        $messageID = $this->_message_insert($message, $this->user_idnr, $folder, $this->create_message_unique_id());
+        $status = $this->_message_insert($message, $this->user_idnr, $folder, $this->create_message_unique_id());
 
-        if ($messageID === FALSE) {
+        if ($status === FALSE) {
             $this->dbmail->rollbackTransaction();
             return FALSE;
+        }
+        else {
+            $physmessage_id = $status["physmessage_id"];
+            $message_id     = $status["message_id"];
         }
 
         $this->dm_quota_user_inc($this->user_idnr, strlen($message));
 
-
-
-        // 3 Create Logical message
-
-        $mime_decoded = $this->decode_raw_message($message);
-        if (!$mime_decoded) {
-            return FALSE;
-        }
-
-        // add 'part_key' property to each part (pass by reference)
-        $this->set_part_keys($mime_decoded, 1);
-
-        console($mime_decoded);
-
-        /*
-         * start transaction
-         */
-        if (!$this->dbmail->startTransaction()) {
-            return FALSE;
-        }
-
-        /*
-         * insert dbmail_physmessage record
-         */
-        $query = "INSERT INTO dbmail_physmessage "
-                . " ("
-                . "    messagesize, "
-                . "    rfcsize, "
-                . "    internal_date"
-                . " ) "
-                . " VALUES "
-                . " ( "
-                . "    '{$this->dbmail->escape(strlen($message))}', "
-                . "    '{$this->dbmail->escape(strlen($message))}', "
-                . "    '{$this->dbmail->escape(date("Y-m-d H:i:s"))}' "
-                . ")";
-
-        if (!$this->dbmail->query($query)) {
+        $status = $this->dm_message_store($message, $physmessage_id);
+        if ($status === FALSE) {
             $this->dbmail->rollbackTransaction();
             return FALSE;
-        }
+        } 
 
-        /*
-         * retrive physmessage_id
-         */
-        $physmessage_id = $this->dbmail->insert_id('dbmail_physmessage');
-        if (!$physmessage_id) {
-            $this->dbmail->rollbackTransaction();
-            return FALSE;
-        }
 
-        /*
-         * insert dbmail_messages record
-         */
-        $query = "INSERT INTO dbmail_messages "
-                . " ("
-                . "    mailbox_idnr,"
-                . "    physmessage_id, "
-                . "    seen_flag, "
-                . "    answered_flag,"
-                . "    deleted_flag, "
-                . "    flagged_flag, "
-                . "    recent_flag, "
-                . "    draft_flag, "
-                . "    unique_id, "
-                . "    status, "
-                . "    seq "
-                . " ) "
-                . " VALUES "
-                . " ( "
-                . "    '{$this->dbmail->escape($mailbox_idnr)}', "
-                . "    '{$this->dbmail->escape($physmessage_id)}', "
-                . "    0, "
-                . "    0, "
-                . "    0, "
-                . "    0, "
-                . "    0, "
-                . "    0, "
-                . "    '{$this->dbmail->escape($this->create_message_unique_id())}', "
-                . "    0, "
-                . "    0 "
-                . " ) ";
+        /** MANCANO TUTTI LE CACHE DEGLI HEADER.... **/
 
-        if (!$this->dbmail->query($query)) {
-            $this->dbmail->rollbackTransaction();
-            return FALSE;
-        }
+        /** MANCA L'ENVELOPE CACHE **/
 
-        /*
-         * retrive message_idnr
-         */
-        $message_idnr = $this->dbmail->insert_id('dbmail_messages');
-        if (!$message_idnr) {
-            $this->dbmail->rollbackTransaction();
-            return FALSE;
-        }
+        /** PENSO MANCHI IL REFERENCE FIELD **/
 
-        // save part list
-        if (!$this->save_message_part($physmessage_id, $mime_decoded)) {
-            $this->dbmail->rollbackTransaction();
-            return FALSE;
-        }
+        /** MANCA L'INCREMENTO DEL SEQ PER IL FOLDER **/
 
         // return status
         return ($this->dbmail->endTransaction() ? TRUE : FALSE);
@@ -3245,15 +3144,15 @@ class rcube_dbmail extends rcube_storage {
      * @param string $raw_message
      * @return Mail_mimeDecode
      */
-    private function decode_raw_message($raw_message) {
+    private function decode_raw_message($raw_message, $decode_bodies = TRUE) {
 
         $mime_decode = new Mail_mimeDecode($raw_message);
 
         $decode_params = array(
             'include_bodies' => TRUE,
-            'decode_bodies' => TRUE,
+            'decode_bodies'  => $decode_bodies,
             'decode_headers' => TRUE,
-            'rfc_822bodies' => TRUE
+            'rfc_822bodies'  => TRUE
         );
 
         /*
@@ -3269,162 +3168,6 @@ class rcube_dbmail extends rcube_storage {
         return $decoded;
     }
 
-    private function save_message_part($physmessage_id, $mime_decoded, $depth = 0) {
-
-        /*
-         * TO DO!!!!!!!!!!
-         * 
-         * fix values for:
-         * - dbmail_physmessage.messagesize
-         * - dbmail_physmessage.rfcsize
-         * - dbmail_partlists.part_depth
-         * - dbmail_partlists.part_order
-         * - dbmail_mimeparts.hash
-         * - dbmail_headervalue.hash
-         * - dbmail_headervalue.sortfield
-         * - dbmail_headervalue.datefield
-         */
-
-
-        if (property_exists($mime_decoded, 'parts')) {
-
-            $children_depth = ($depth + 1);
-
-            foreach ($mime_decoded->parts as $part) {
-
-                if (!$this->save_message_part($physmessage_id, $part, $children_depth)) {
-                    // error - break loop
-                    return FALSE;
-                }
-            }
-        }
-
-
-        if (property_exists($mime_decoded, 'headers')) {
-
-            $headers = '';
-            foreach ($mime_decoded->headers as $header_name => $header_value) {
-
-                // Headers have a specific CASE-matching rule...
-                if (strtolower($header_name) == "from") $header_name = "From";
-                if (strtolower($header_name) == "to") $header_name = "To";
-                if (strtolower($header_name) == "cc") $header_name = "Cc";
-                if (strtolower($header_name) == "bcc") $header_name = "Bcc";
-                if (strtolower($header_name) == "organization") $header_name = "Organization";
-                if (strtolower($header_name) == "subject") $header_name = "Subject";
-                if (strtolower($header_name) == "date") $header_name = "Date";
-                if (strtolower($header_name) == "content-type") $header_name = "Content-Type";
-                if (strtolower($header_name) == "mime-version") $header_name = "MIME-Version";
-                if (strtolower($header_name) == "message-id") $header_name = "Message-ID";
-                if (strtolower($header_name) == "x-sender") $header_name = "X-Sender";
-                if (strtolower($header_name) == "user-agent") $header_name = "User-Agent";
-
-                $headers .= $header_name . $this->get_header_delimiter($header_name) . $header_value . "\n";
-            }
-
-            $query = "INSERT INTO dbmail_mimeparts "
-                    . " ( "
-                    . "     hash, "
-                    . "     data, "
-                    . "     size "
-                    . " ) "
-                    . " VALUES "
-                    . " ( "
-                    . "     '{$this->dbmail->escape(md5($headers))}', "
-                    . "     '{$this->dbmail->escape($headers)}', "
-                    . "     '{$this->dbmail->escape(strlen($headers))}' "
-                    . " ) ";
-
-            if (!$this->dbmail->query($query)) {
-                return FALSE;
-            }
-
-            // retrive part list header id
-            $header_part_list_id = $this->dbmail->insert_id('dbmail_mimeparts');
-            if (!$header_part_list_id) {
-                return FALSE;
-            }
-
-            $query = "INSERT INTO dbmail_partlists "
-                    . " ( "
-                    . "    physmessage_id, "
-                    . "    is_header, "
-                    . "    part_key, "
-                    . "    part_depth, "
-                    . "    part_order, "
-                    . "    part_id "
-                    . " ) "
-                    . " VALUES "
-                    . " ( "
-                    . "    '{$this->dbmail->escape($physmessage_id)}', "
-                    . "    '1', "
-                    . "    '{$this->dbmail->escape($mime_decoded->header_part_key)}', "
-                    . "    '0', "
-                    . "    '0', "
-                    . "    '{$this->dbmail->escape($header_part_list_id)}' "
-                    . " ) ";
-
-            if (!$this->dbmail->query($query)) {
-                return FALSE;
-            }
-        }
-
-
-        if (property_exists($mime_decoded, 'body')) {
-
-//          Not neededed, the message is getting a 8bit header
-//          $body = quoted_printable_encode($mime_decoded->body);
-            $body = $mime_decoded->body;
-
-            $query = "INSERT INTO dbmail_mimeparts "
-                    . " ( "
-                    . "     hash, "
-                    . "     data, "
-                    . "     size "
-                    . " ) "
-                    . " VALUES "
-                    . " ( "
-                    . "     '{$this->dbmail->escape(   md5($body))}', "
-                    . "     '{$this->dbmail->escape(       $body)}', "
-                    . "     '{$this->dbmail->escape(strlen($body))}'  "
-                    . " ) ";
-
-            if (!$this->dbmail->query($query)) {
-                return FALSE;
-            }
-
-            // retrive part list body id
-            $body_part_list_id = $this->dbmail->insert_id('dbmail_mimeparts');
-            if (!$body_part_list_id) {
-                return FALSE;
-            }
-
-            $query = "INSERT INTO dbmail_partlists "
-                    . " ( "
-                    . "    physmessage_id, "
-                    . "    is_header, "
-                    . "    part_key, "
-                    . "    part_depth, "
-                    . "    part_order, "
-                    . "    part_id "
-                    . " ) "
-                    . " VALUES "
-                    . " ( "
-                    . "    '{$this->dbmail->escape($physmessage_id)}', "
-                    . "    '0', "
-                    . "    '{$this->dbmail->escape($mime_decoded->body_part_key)}', "
-                    . "    '0', "
-                    . "    '0', "
-                    . "    '{$this->dbmail->escape($body_part_list_id)}' "
-                    . " ) ";
-
-            if (!$this->dbmail->query($query)) {
-                return FALSE;
-            }
-        }
-
-        return TRUE;
-    }
 
     /**
      * create raw message from part lists
@@ -3765,26 +3508,232 @@ class rcube_dbmail extends rcube_storage {
         if (! $mailbox_idnr) return FALSE;
 
         // 2 Create Physical message
-        $physmessage_id = $this->insert_physmessage($message);
+        $physmessage_id = $this->insert_physmessage($DbmailMessage);
         if ($physmessage_id === FALSE) return FALSE;
 
         $query = "INSERT INTO dbmail_messages SET "
-                . "     mailbox_idnr = "   . $mailbox_idnr   . ", "
-                . "     physmessage_id = " . $physmessage_id . ", "
-                . "     unique_id = "      . $unique_id      . ", "
+                . "     mailbox_idnr = "   . $mailbox_idnr   . ",  "
+                . "     physmessage_id = " . $physmessage_id . ",  "
+                . "     unique_id = '"     . $unique_id      . "', "
                 . "     recent_flag = 1, "
                 . "     status = "         . SELF::MESSAGE_STATUS_NEW;
 
+        $status["message_id"] = $this->dbmail->insert_id('dbmail_messages');
+        $status["physmessage_id"] = $physmessage_id;
+
         if    (!$this->dbmail->query($query))   return FALSE;
-        else                                    return $this->dbmail->insert_id('dbmail_physmessage');
+        else                                    return $status;
 
 
     }
 
 
-    private function dm_message_store($message) {
 
-        
+    private function hash_string($string) {
+
+        $hashMethod = $this->rcubeInstance->config->get('dbmail_hash', "sha1");
+
+        if ($hashMethod == "sha1")      return hash("sha1",       $string);
+        if ($hashMethod == "md5")       return hash("md5",        $string);
+        if ($hashMethod == "sha256")    return hash("sha256",     $string);
+        if ($hashMethod == "sha512")    return hash("sha512",     $string);
+        if ($hashMethod == "whirlpool") return hash("whirlpool",  $string);
+        if ($hashMethod == "tiger")     return hash("tiger192,3", $string);   /// don't know exactly which variant of tiger is the correct one
+
+        // if everything fails... let's get back to a standard default
+        return hash("sha1", $string);
+
+    }
+
+
+    /**
+     * Function to store part of a message
+     * 
+     * @param string $data the part to save
+     * @param int $is_header is this part an header?
+     * @param int $part_key part key
+     * @param int $part_depth part depth
+     * @param int $part_order part order
+     * 
+     * @return bool true on success, false on error
+     */
+    private function _part_insert($physmessage_id, $data, $is_header, $part_key, $part_depth, $part_order) {
+
+        console("Part Insert, physmessage id: ".$physmessage_id);
+        console("Part Insert, is header:      ".$is_header);
+        console("Part Insert, part key:       ".$part_key);
+        console("Part Insert, part depth:     ".$part_depth);
+        console("Part Insert, part order:     ".$part_order);
+
+        /* equivalent of blob_exists, blob_insert and blob_register of dbmail */
+
+        // Io ricevo $data, capisco se è necessario salvarla o meno, se non è
+        // necessario riciclo l'id di prima. A questo punto registro la parte
+        // salvata (o no) nel database.
+
+        $hash = $this->hash_string($data);
+        console("Part Insert, hash:           ".$hash);
+
+        /* Implementation of blob_esists */
+
+        $query = "SELECT id FROM dbmail_mimeparts WHERE hash = '".$hash."' AND size = '".strlen($data)."'";
+        $result = $this->dbmail->query($query);
+
+        if ($this->dbmail->num_rows($result) == 1) {
+            Console("Part already in the DB");
+            // The part is already in the DB! Wow!
+            $row = $this->dbmail->fetch_assoc($result);
+            $part_id = $row["id"];
+        }
+        else {
+            Console("Part is not in the DB");
+            /* Implementation of blob_insert */
+
+            $query = "INSERT INTO dbmail_mimeparts SET
+                        hash = '".$hash."',
+                        data = '".$this->dbmail->escape($data)."',
+                        size = '".strlen($data)."'";
+
+            if (!$this->dbmail->query($query)) return FALSE;
+
+            $part_id = $this->dbmail->insert_id('dbmail_mimeparts');
+
+        }
+
+        /* Implementation of register_blob */ 
+
+        $query = "INSERT INTO dbmail_partlists SET
+                    physmessage_id = ".$physmessage_id.",
+                    is_header      = ".$is_header.",
+                    part_key       = ".$part_key.",
+                    part_depth     = ".$part_depth.",
+                    part_order     = ".$part_order.",
+                    part_id        = ".$part_id;
+
+        if (!$this->dbmail->query($query)) return FALSE;
+
+    }
+
+
+    /**
+     * Function to exract the RAW Headers of a message
+     * It simply read the message up to the first empty new line
+     * Partially stolen from https://github.com/plancake/official-library-php-email-parser
+     *
+     * @param string $input the message to parse
+     *
+     * @return string $raw_header the message headers
+     */
+    private function extract_raw_headers_from_message($input) {
+
+        $lines = preg_split("/(\r?\n|\r)/", $input);
+
+        $raw_header = '';
+
+        foreach ($lines as $line) {
+            if (strlen(trim($line)) > 0) $raw_header .= $line.PHP_EOL;
+            else break;
+        }
+
+        return $raw_header;
+
+    }
+
+    private function store_mime_object($physmessage_id, $mime_decoded, &$part_key, $part_depth, $part_order) {
+
+        console("Store mime object");
+        console($mime_decoded);
+        console("Store mime object - part key:   ".$part_key);
+        console("Store mime object - part depth: ".$part_depth);
+        console("Store mime object - part order: ".$part_order);
+
+        // Top level headers (depth = 0) are taken directly from the message envelope
+        if ($part_depth > 0) {
+
+            if (property_exists($mime_decoded, 'headers')) {
+                Console("We have an header");
+
+                $part_key++;
+
+                $headers = '';
+                foreach ($mime_decoded->headers as $header_name => $header_value) {
+
+                    // Headers have a specific CASE-matching rule...
+                    if (strtolower($header_name) == "content-type") $header_name = "Content-Type";
+                    if (strtolower($header_name) == "mime-version") $header_name = "MIME-Version";
+
+                    $headers .= $header_name . $this->get_header_delimiter($header_name) . $header_value . "\n";
+                }
+
+                $status = $this->_part_insert($physmessage_id, $headers, 1, $part_key, $part_depth, $part_order);
+                if ($status === FALSE) return FALSE;
+
+                $part_order++;
+            }
+
+        }
+
+        // Do we have a body?
+        if (property_exists($mime_decoded, 'body')) {
+            Console("We have a message");
+            $status = $this->_part_insert($physmessage_id, $mime_decoded->body, 0, $part_key, $part_depth, $part_order);
+            if ($status === FALSE) return FALSE;
+        }
+        else {
+            if ($part_depth == 0) {
+                Console("Empty body for first level");
+                $status = $this->_part_insert($physmessage_id, "This is a multi-part message in MIME format.", 0, $part_key, $part_depth, $part_order);
+                if ($status === FALSE) return FALSE;
+            }
+
+        }
+
+        // Do we have additional parts?
+        if (property_exists($mime_decoded, 'parts')) {
+            Console("We have parts");
+            $part_depth++;
+            $part_order = 0;  // When depth rises, order goes zero
+            foreach($mime_decoded->parts as $eachPart) {
+                $status = $this->store_mime_object($physmessage_id, $eachPart, $part_key, $part_depth, $part_order);
+                if ($status === FALSE) return FALSE;
+                $part_order++;
+            }
+        }
+
+
+    }
+
+
+    /**
+     * Function to store a message, splitted in mime parts, into the Database
+     *
+     * @param string $message the message to store
+     *
+     * @return bool true on success, false on error
+     */
+    private function dm_message_store($message, $physmessage_id) {
+
+        console("DM Message Store");
+
+        $part_key = 1;
+        $part_depth = 0;
+        $part_order = 0;
+
+        $raw_header = $this->extract_raw_headers_from_message($message);
+
+        console($raw_header);
+
+        $status = $this->_part_insert($physmessage_id, $raw_header, 1, $part_key, $part_depth, $part_order); // This is the fist piece of message
+        if ($status === FALSE) return FALSE;
+
+        $mime_decoded = $this->decode_raw_message($message, FALSE);
+        if (!$mime_decoded) return FALSE;
+
+        $status = $this->store_mime_object($physmessage_id, $mime_decoded, $part_key, $part_depth, 1);
+        if ($status === FALSE) return FALSE;
+
+        return TRUE;
+
     }
 
 
