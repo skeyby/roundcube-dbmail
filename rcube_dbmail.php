@@ -1175,8 +1175,6 @@ class rcube_dbmail extends rcube_storage {
      */
     public function delete_message($uids, $folder = null) {
 
-        /* User QUOTA update is missing! */
-
         if (!strlen($folder)) {
             $folder = $this->folder;
         }
@@ -1194,6 +1192,17 @@ class rcube_dbmail extends rcube_storage {
 
         foreach ($message_uids as $message_uid) {
 
+            $query = "SELECT dbmail_physmessage.messagesize FROM dbmail_physmessage, dbmail_messages
+                        WHERE dbmail_messages.message_idnr = ".$message_uid."
+                        AND   dbmail_physmessage.id = dbmail_messages.physmessage_id";
+
+            $res = $this->dbmail->query($query);
+            if ($this->dbmail->num_rows($res) == 1) {
+                $row = $this->dbmail->fetch_assoc($res);
+                $size= $row["messagesize"];
+            }
+            else $size = 0;
+
             $query = "DELETE FROM dbmail_messages "
                     . " WHERE message_idnr = {$this->dbmail->escape($message_uid)} ";
 
@@ -1202,6 +1211,9 @@ class rcube_dbmail extends rcube_storage {
                 $this->dbmail->rollbackTransaction();
                 return FALSE;
             }
+
+            $this->dm_quota_user_dec($this->user_idnr, $size);
+
         }
 
         return ($this->dbmail->endTransaction() ? TRUE : FALSE);
@@ -1217,8 +1229,6 @@ class rcube_dbmail extends rcube_storage {
      * @return boolean True on success, False on error
      */
     public function expunge_message($uids, $folder = null, $clear_cache = true) {
-
-        /* User QUOTA update is missing! */
 
         if (!strlen($folder)) {
             $folder = $this->folder;
@@ -1237,6 +1247,17 @@ class rcube_dbmail extends rcube_storage {
 
         foreach ($message_uids as $message_uid) {
 
+            $query = "SELECT dbmail_physmessage.messagesize FROM dbmail_physmessage, dbmail_messages
+                        WHERE dbmail_messages.message_idnr = ".$message_uid."
+                        AND   dbmail_physmessage.id = dbmail_messages.physmessage_id";
+
+            $res = $this->dbmail->query($query);
+            if ($this->dbmail->num_rows($res) == 1) {
+                $row = $this->dbmail->fetch_assoc($res);
+                $size= $row["messagesize"];
+            }
+            else $size = 0;
+
             $query = "DELETE FROM dbmail_messages "
                     . " WHERE message_idnr = {$this->dbmail->escape($message_uid)} "
                     . " AND deleted_flag = 1";  // Just a double check, list_message_should return only deleted ones
@@ -1246,6 +1267,9 @@ class rcube_dbmail extends rcube_storage {
                 $this->dbmail->rollbackTransaction();
                 return FALSE;
             }
+
+            $this->dm_quota_user_dec($this->user_idnr, $size);
+
         }
 
         return ($this->dbmail->endTransaction() ? TRUE : FALSE);
