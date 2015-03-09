@@ -1031,13 +1031,15 @@ class rcube_dbmail extends rcube_storage {
         }
 
         // store main mail headers
-        if (!$this->_part_insert($physmessage_id, $raw_headers, 1, 1, 0, 0)) {
+        $real_headers = $this->extract_raw_headers_from_message($message);
+        if (!$this->_part_insert($physmessage_id, $real_headers, 1, 1, 0, 0)) {
             $this->dbmail->rollbackTransaction();
             return FALSE;
         }
 
         // store mime parts
-        if (!$this->store_mime_object($physmessage_id, $mime_decoded, 1, 0, 1)) {
+        $part_key = 1;  ## this must be in a variable because it's passed by reference
+        if (!$this->store_mime_object($physmessage_id, $mime_decoded, $part_key, 0, 1)) {
             $this->dbmail->rollbackTransaction();
             return FALSE;
         }
@@ -3654,11 +3656,21 @@ class rcube_dbmail extends rcube_storage {
 
         $hash = $this->hash_string($data);
 
+        ## Enable debug as you please by changing this to TRUE
+        if (FALSE) {
+            console("Part Insert, physmessage id: ".$physmessage_id);
+            console("Part Insert, is header:      ".$is_header);
+            console("Part Insert, part key:       ".$part_key);
+            console("Part Insert, part depth:     ".$part_depth);
+            console("Part Insert, part order:     ".$part_order);
+            console("Part Insert, hash:           ".$hash);
+        }
+
         // blob exists?
         $query = "SELECT id "
                 . " FROM dbmail_mimeparts "
                 . " WHERE hash = '{$this->dbmail->escape($hash)}' "
-                . " AND size = '{$this->dbmail->escape(strlen($data))}'";
+                . " AND size = {$this->dbmail->escape(strlen($data))}";
 
         $result = $this->dbmail->query($query);
 
@@ -3675,7 +3687,7 @@ class rcube_dbmail extends rcube_storage {
                     . " ( "
                     . "    '{$this->dbmail->escape($hash)}', "
                     . "    '{$this->dbmail->escape($data)}', "
-                    . "    '{$this->dbmail->escape(strlen($data))}' "
+                    . "    {$this->dbmail->escape(strlen($data))} "
                     . " ) ";
 
             if (!$this->dbmail->query($query)) {
@@ -3725,34 +3737,32 @@ class rcube_dbmail extends rcube_storage {
      *
      * @return string $raw_header the message headers
      */
-    /*
+    
       private function extract_raw_headers_from_message($input) {
 
-      $lines = preg_split("/(\r?\n|\r)/", $input);
+	$lines = preg_split("/(\r?\n|\r)/", $input);
 
-      $raw_header = '';
+	$raw_header = '';
 
-      foreach ($lines as $line) {
-      if (strlen(trim($line)) > 0)
-      $raw_header .= $line . PHP_EOL;
-      else
-      break;
+	foreach ($lines as $line) {
+		if (strlen(trim($line)) > 0) $raw_header .= $line . PHP_EOL;
+		else break;
+	}
+
+	return $raw_header;
       }
-
-      return $raw_header;
-      }
-     */
+     
 
     /**
      * Store supplied part item
      * @param int $physmessage_id
      * @param Mail_mimeDecode obj
-     * @param int $part_key (1 = first item)
+     * @param int $part_key (1 = first item) - by refereeence!
      * @param int $part_depth (0 = first item)
      * @param int $part_order (0 = first item)
      * @return boolean True on success, False on Failure
      */
-    private function store_mime_object($physmessage_id, $mime_decoded, $part_key, $part_depth, $part_order) {
+    private function store_mime_object($physmessage_id, $mime_decoded, &$part_key, $part_depth, $part_order) {
         /*
           console("Store mime object");
           console($mime_decoded);
