@@ -988,6 +988,7 @@ class rcube_dbmail extends rcube_storage {
             5 Update USER Quota        (step == 1) - function _update_message
             6 Update headers cache     (step == 3) - function dbmail_message_cache_headers
             7 Update envelope cache                - function dbmail_message_cache_envelope
+            8 Update reference field 
 
         */
 
@@ -1016,10 +1017,15 @@ class rcube_dbmail extends rcube_storage {
 
 
         /** MANCANO TUTTI LE CACHE DEGLI HEADER.... **/
+        // funzione _header_cache in dm_message.c
 
         /** MANCA L'ENVELOPE CACHE **/
+        // funzione imap_get_envelope in dm_misc.c
+        // è un po' mostruosa ma alla fine facile
 
         /** PENSO MANCHI IL REFERENCE FIELD **/
+        // funzione dbmail_message_cache_referencesfield in dm_message.c
+        // Generato a partire dall'header "References" oppure "In-Reply-To"
 
         // Let's increment the SEQ for the folder
         $this->increment_mailbox_seq($this->get_mail_box_id($folder));
