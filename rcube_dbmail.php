@@ -1021,7 +1021,8 @@ class rcube_dbmail extends rcube_storage {
 
         /** PENSO MANCHI IL REFERENCE FIELD **/
 
-        /** MANCA L'INCREMENTO DEL SEQ PER IL FOLDER **/
+        // Let's increment the SEQ for the folder
+        $this->increment_mailbox_seq($this->get_mail_box_id($folder));
 
         // return status
         return ($this->dbmail->endTransaction() ? TRUE : FALSE);
@@ -1043,6 +1044,14 @@ class rcube_dbmail extends rcube_storage {
         if (!$to_mailbox_idnr) {
             return FALSE;
         }
+
+        if ($from != null) {
+            $from_mailbox_idnr = $this->get_mail_box_id($from);
+            if (!$from_mailbox_idnr) {
+                return FALSE;
+            }
+        } else $from_mailbox_idnr = null;
+
 
         // format target message UIDs
         $message_uids = $this->list_message_UIDs($uids, $from);
@@ -1068,6 +1077,9 @@ class rcube_dbmail extends rcube_storage {
                 return FALSE;
             }
         }
+
+        $this->increment_mailbox_seq($from_mailbox_idnr);
+        $this->increment_mailbox_seq($to_mailbox_idnr);
 
         // return status
         return ($this->dbmail->endTransaction() ? TRUE : FALSE);
@@ -1161,6 +1173,8 @@ class rcube_dbmail extends rcube_storage {
             }
         }
 
+        $this->increment_mailbox_seq($to_mailbox_idnr);
+
         // return status
         return ($this->dbmail->endTransaction() ? TRUE : FALSE);
     }
@@ -1215,6 +1229,8 @@ class rcube_dbmail extends rcube_storage {
             $this->dm_quota_user_dec($this->user_idnr, $size);
 
         }
+
+        $this->increment_mailbox_seq($this->get_mail_box_id($folder));
 
         return ($this->dbmail->endTransaction() ? TRUE : FALSE);
     }
@@ -1271,6 +1287,8 @@ class rcube_dbmail extends rcube_storage {
             $this->dm_quota_user_dec($this->user_idnr, $size);
 
         }
+
+        $this->increment_mailbox_seq($this->get_mail_box_id($folder));
 
         return ($this->dbmail->endTransaction() ? TRUE : FALSE);
 
