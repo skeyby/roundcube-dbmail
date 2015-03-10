@@ -423,32 +423,34 @@ class rcube_dbmail extends rcube_storage {
             return FALSE;
         }
 
-        $where_condition = '';
-        switch ($mode) {
-            case 'ALL':
-                // no filters applied
-                $where_condition = '';
-                break;
-            case 'THREADS':
-                // TO DO!!!!!
-                $where_condition = '';
-                break;
-            case 'UNSEEN':
-                $where_condition = " and seen_flag = 0 ";
-                break;
-            case 'RECENT':
-                $where_condition = " and recent_flag = 1 ";
-                break;
-            case 'EXISTS':
-                // TO DO!!!!!
-                $where_condition = '';
-                break;
+        $search_conditions = NULL;
+        if (is_array($this->search_set) && array_key_exists(0, $this->search_set)) {
+            $search_conditions = $this->format_search_parameters($this->search_set[0]);
         }
 
-        $query = "SELECT count(*) as items_count "
+        // set additional join tables according to supplied search / filter conditions
+        $additional_joins = "";
+        if (is_object($search_conditions) && property_exists($search_conditions, 'additional_join_tables')) {
+            $additional_joins .= " {$search_conditions->additional_join_tables}";
+        }
+
+        // set where conditions according to supplied search / filter conditions
+        $where_conditions = " WHERE 1 = 1 ";
+        if (is_object($search_conditions) && property_exists($search_conditions, 'formatted_filter_str') && strlen($search_conditions->formatted_filter_str) > 0) {
+            $where_conditions .= " AND ( {$search_conditions->formatted_filter_str} )";
+        }
+
+        if (is_object($search_conditions) && property_exists($search_conditions, 'formatted_search_str') && strlen($search_conditions->formatted_search_str) > 0) {
+            $where_conditions .= " AND ( {$search_conditions->formatted_search_str} )";
+        }
+
+        // prepare base query
+        $query = " SELECT COUNT(DISTINCT dbmail_messages.message_idnr) AS items_count "
                 . " FROM dbmail_messages "
-                . " WHERE mailbox_idnr = {$this->dbmail->escape($mailbox_idnr)} "
-                . " {$where_condition} ";
+                . " INNER JOIN dbmail_physmessage ON dbmail_messages.physmessage_id = dbmail_physmessage.id AND dbmail_messages.mailbox_idnr = {$this->dbmail->escape($mailbox_idnr)} ";
+
+        $query .= " {$additional_joins} ";
+        $query .= " {$where_conditions} ";
 
         $res = $this->dbmail->query($query);
         $row = $this->dbmail->fetch_assoc($res);
@@ -761,7 +763,34 @@ class rcube_dbmail extends rcube_storage {
      * @return string Message source string
      */
     public function get_raw_body($uid, $fp = null) {
-        // TO DO!!!!!!
+
+        // retrive message record
+        $message_metadata = $this->get_message_record($uid);
+        if (!$message_metadata) {
+            // not found
+            return FALSE;
+        }
+
+        // retrive physmessage record
+        $physmessage_id = $message_metadata['physmessage_id'];
+        $physmessage_metadata = $this->get_physmessage_record($physmessage_id);
+        if (!$physmessage_metadata) {
+            // not found
+            return FALSE;
+        }
+
+        // retrive folder record
+        $mailbox_idnr = $message_metadata['mailbox_idnr'];
+        $folder_record = $this->get_folder_record($mailbox_idnr);
+        if (!$folder_record) {
+            // not found
+            return FALSE;
+        }
+
+        // extract mime parts
+        $mime = $this->fetch_part_lists($physmessage_id);
+
+        return $mime->body;
     }
 
     /**
@@ -775,23 +804,31 @@ class rcube_dbmail extends rcube_storage {
 
         // retrive message record
         $message_metadata = $this->get_message_record($uid);
-        if (!$message_metadata)
+        if (!$message_metadata) {
+            // not found
             return FALSE;
+        }
 
-        $query = "SELECT dm.* FROM dbmail_partlists dp, dbmail_mimeparts dm
-                    WHERE dp.physmessage_id = " . $message_metadata['physmessage_id'] . " 
-                    AND   dp.is_header  = 1
-                    AND   dp.part_depth = 0
-                    AND   dm.id = dp.part_id";
-
-        $result = $this->dbmail->query($query);
-
-        if ($result === FALSE)
+        // retrive physmessage record
+        $physmessage_id = $message_metadata['physmessage_id'];
+        $physmessage_metadata = $this->get_physmessage_record($physmessage_id);
+        if (!$physmessage_metadata) {
+            // not found
             return FALSE;
+        }
 
-        $row = $this->dbmail->fetch_assoc($result);
+        // retrive folder record
+        $mailbox_idnr = $message_metadata['mailbox_idnr'];
+        $folder_record = $this->get_folder_record($mailbox_idnr);
+        if (!$folder_record) {
+            // not found
+            return FALSE;
+        }
 
-        return $row["data"];
+        // extract mime parts
+        $mime = $this->fetch_part_lists($physmessage_id);
+
+        return $mime->header;
     }
 
     /**
@@ -801,7 +838,11 @@ class rcube_dbmail extends rcube_storage {
      * @param bool $formatted Enables line-ending formatting
      */
     public function print_raw_body($uid, $formatted = true) {
-        // TO DO!!!!!!
+
+        echo ($this->get_raw_headers($uid));
+        echo ($this->get_raw_body($uid));
+
+        return TRUE;
     }
 
     /**
@@ -931,14 +972,18 @@ class rcube_dbmail extends rcube_storage {
             return FALSE;
         }
 
-        // 1 Find folder
+        /*
+         *  1 Find folder
+         */
         $mailbox_idnr = $this->get_mail_box_id($folder);
         if (!$mailbox_idnr) {
             // not found
             return FALSE;
         }
 
-        // 2 Create physical message
+        /*
+         *  2 Create physical message
+         */
         $query = "INSERT INTO dbmail_physmessage "
                 . " ( "
                 . "    messagesize, "
@@ -947,8 +992,8 @@ class rcube_dbmail extends rcube_storage {
                 . " ) "
                 . " VALUES "
                 . " ( "
-                . "    '{$this->dbmail->escape(strlen($DbmailMessage))}', "
-                . "    '{$this->dbmail->escape(strlen($DbmailMessage))}', "
+                . "    '{$this->dbmail->escape(strlen($message))}', "
+                . "    '{$this->dbmail->escape(strlen($message))}', "
                 . "    NOW() "
                 . " ) ";
 
@@ -964,7 +1009,9 @@ class rcube_dbmail extends rcube_storage {
             return FALSE;
         }
 
-        // 3 Create (logical) message
+        /*
+         *  3 Create (logical) message
+         */
         $query = "INSERT INTO dbmail_messages "
                 . " ( "
                 . "    mailbox_idnr, "
@@ -979,7 +1026,7 @@ class rcube_dbmail extends rcube_storage {
                 . "    '{$this->dbmail->escape($physmessage_id)}', "
                 . "    '{$this->dbmail->escape($this->create_message_unique_id())}', "
                 . "    1, "
-                . "    '{$this->dbmail->escape(SELF::MESSAGE_STATUS_NEW)}' "
+                . "    '{$this->dbmail->escape(self::MESSAGE_STATUS_SEEN)}' "
                 . " )";
 
         if (!$this->dbmail->query($query)) {
@@ -994,7 +1041,9 @@ class rcube_dbmail extends rcube_storage {
             return FALSE;
         }
 
-        // 4 Update USER Quota
+        /*
+         *  4 Update USER Quota
+         */
         if (!$this->increment_user_quota($this->user_idnr, strlen($message))) {
             $this->dbmail->rollbackTransaction();
             return FALSE;
@@ -1006,6 +1055,28 @@ class rcube_dbmail extends rcube_storage {
             $this->dbmail->rollbackTransaction();
             return FALSE;
         }
+
+        /*
+         * 5 Save message parts
+         */
+
+        // store main mail headers (retrive real message headers instead of using Mail_mimeDecode content which are lowercased!!!!)
+        $real_headers = $this->extract_raw_headers_from_message($message);
+        if (!$this->_part_insert($physmessage_id, $real_headers, 1, 1, 0, 0)) {
+            $this->dbmail->rollbackTransaction();
+            return FALSE;
+        }
+
+        // store mime parts
+        $part_key = 1;  ## this must be in a variable because it's passed by reference
+        if (!$this->store_mime_object($physmessage_id, $mime_decoded, $part_key, 0, 1)) {
+            $this->dbmail->rollbackTransaction();
+            return FALSE;
+        }
+
+        /*
+         * 6 Update headers cache
+         */
 
         // set raw headers string and store searchable header name /value pairs
         $raw_headers = '';
@@ -1023,26 +1094,16 @@ class rcube_dbmail extends rcube_storage {
             }
         }
 
-        // store mail envelope
+        /*
+         * 7 Update envelope cache 
+         */
         $envelope_headers = $this->get_mail_envelope_headers($raw_headers);
         if (!$this->save_mail_envelope_headers($physmessage_id, $envelope_headers)) {
             $this->dbmail->rollbackTransaction();
             return FALSE;
         }
 
-        // store main mail headers
-        $real_headers = $this->extract_raw_headers_from_message($message);
-        if (!$this->_part_insert($physmessage_id, $real_headers, 1, 1, 0, 0)) {
-            $this->dbmail->rollbackTransaction();
-            return FALSE;
-        }
 
-        // store mime parts
-        $part_key = 1;  ## this must be in a variable because it's passed by reference
-        if (!$this->store_mime_object($physmessage_id, $mime_decoded, $part_key, 0, 1)) {
-            $this->dbmail->rollbackTransaction();
-            return FALSE;
-        }
 
         // increment folder 'seq' flag
         if (!$this->increment_mailbox_seq($mailbox_idnr)) {
@@ -1058,14 +1119,14 @@ class rcube_dbmail extends rcube_storage {
         /** MANCA L'ENVELOPE CACHE * */
         // funzione imap_get_envelope in dm_misc.c
         // è un po' mostruosa ma alla fine facile
-        // (VEDI tabella dbmail_envelope))
+        // (VEDI tabella dbmail_envelope)) (FATTO)
 
         /** PENSO MANCHI IL REFERENCE FIELD * */
         // funzione dbmail_message_cache_referencesfield in dm_message.c
         // Generato a partire dall'header "References" oppure "In-Reply-To"
         // increment folder 'seq' flag (FATTO)
 
-        return ($this->dbmail->endTransaction() ? TRUE : FALSE);
+        return ($this->dbmail->endTransaction() ? $message_idnr : FALSE);
     }
 
     /**
@@ -1085,14 +1146,11 @@ class rcube_dbmail extends rcube_storage {
             return FALSE;
         }
 
-        if ($from != null) {
-            $from_mailbox_idnr = $this->get_mail_box_id($from);
-            if (!$from_mailbox_idnr) {
-                return FALSE;
-            }
-        } else
-            $from_mailbox_idnr = null;
-
+        // source folder exists?
+        $from_mailbox_idnr = null;
+        if ($from != null && !$from_mailbox_idnr = $this->get_mail_box_id($from)) {
+            return FALSE;
+        }
 
         // format target message UIDs
         $message_uids = $this->list_message_UIDs($uids, $from);
@@ -1129,6 +1187,8 @@ class rcube_dbmail extends rcube_storage {
     /**
      * Copy message(s) from one mailbox to another.
      *
+     * (physmessage deduplication aware!!!!!)
+     * 
      * @param mixed  $uids  Message UIDs as array or comma-separated string, or '*'
      * @param string $to    Target folder
      * @param string $from  Source folder
@@ -1137,15 +1197,21 @@ class rcube_dbmail extends rcube_storage {
      */
     public function copy_message($uids, $to, $from = null) {
 
-        // format supplied message UIDs list
-        $message_uids = $this->list_message_UIDs($uids, $from);
-        if (!$message_uids) {
-            return FALSE;
-        }
-
         // destination folder exists?
         $to_mailbox_idnr = $this->get_mail_box_id($to);
         if (!$to_mailbox_idnr) {
+            return FALSE;
+        }
+
+        // source folder exists?
+        $from_mailbox_idnr = null;
+        if ($from != null && !$from_mailbox_idnr = $this->get_mail_box_id($from)) {
+            return FALSE;
+        }
+
+        // format supplied message UIDs list
+        $message_uids = $this->list_message_UIDs($uids, $from);
+        if (!$message_uids) {
             return FALSE;
         }
 
@@ -1157,22 +1223,31 @@ class rcube_dbmail extends rcube_storage {
         // loop messages
         foreach ($message_uids as $message_uid) {
 
-            // extract message details
-            $query = " SELECT * "
-                    . " FROM dbmail_messages "
-                    . " WHERE message_idnr = {$this->dbmail->escape($message_uid)} ";
-
-            $res = $this->dbmail->query($query);
-
-            if ($this->dbmail->num_rows($res) == 0) {
-                // Record not found
+            // retrive message record
+            $message_metadata = $this->get_message_record($message_uid);
+            if (!$message_metadata) {
+                // not found
                 $this->dbmail->rollbackTransaction();
                 return FALSE;
             }
 
-            $row = $this->dbmail->fetch_assoc($res);
+            // flag 'deleted' validation
+            if ($message_metadata['deleted_flag']) {
+                // don't copy deleted messages
+                continue;
+            }
 
-            if ($row['mailbox_idnr'] == $to_mailbox_idnr) {
+            // retrive physmessage record
+            $physmessage_id = $message_metadata['physmessage_id'];
+            $physmessage_metadata = $this->get_physmessage_record($physmessage_id);
+            if (!$physmessage_metadata) {
+                // not found
+                $this->dbmail->rollbackTransaction();
+                return FALSE;
+            }
+
+            // validate source / destination folders
+            if ($message_metadata['mailbox_idnr'] == $to_mailbox_idnr) {
                 // source folder equal to destination folder, do nothing!
                 continue;
             }
@@ -1195,15 +1270,15 @@ class rcube_dbmail extends rcube_storage {
                     . " VALUES "
                     . " ( "
                     . "      {$this->dbmail->escape($to_mailbox_idnr)}, "
-                    . "      {$this->dbmail->escape($row['physmessage_id'])}, "
+                    . "      {$this->dbmail->escape($physmessage_id)}, "
                     . "      0, "
                     . "      0, "
                     . "      0, "
                     . "      0, "
                     . "      0, "
                     . "      0, "
-                    . "      '{$this->dbmail->escape($row['unique_id'])}', "
-                    . "      0, "
+                    . "      '{$this->dbmail->escape($this->create_message_unique_id($message_uid))}', "
+                    . "      '{$this->dbmail->escape(self::MESSAGE_STATUS_SEEN)}',, "
                     . "      0 "
                     . " ) ";
 
@@ -1212,9 +1287,18 @@ class rcube_dbmail extends rcube_storage {
                 $this->dbmail->rollbackTransaction();
                 return FALSE;
             }
+
+            // increment user quota
+            if (!$this->increment_user_quota($this->user_idnr, $physmessage_metadata['messagesize'])) {
+                $this->dbmail->rollbackTransaction();
+                return FALSE;
+            }
         }
 
-        $this->increment_mailbox_seq($to_mailbox_idnr);
+        if (!$this->increment_mailbox_seq($to_mailbox_idnr)) {
+            $this->dbmail->rollbackTransaction();
+            return FALSE;
+        }
 
         // return status
         return ($this->dbmail->endTransaction() ? TRUE : FALSE);
@@ -1223,15 +1307,22 @@ class rcube_dbmail extends rcube_storage {
     /**
      * Mark message(s) as deleted and expunge.
      *
-     * @param mixed  $uids    Message UIDs as array or comma-separated string, or '*'
-     * @param string $folder  Source folder
+     * @param mixed   $uids                 Message UIDs as array or comma-separated string, or '*'
+     * @param string  $folder               Source folder
+     * @param boolean $skip_transaction     Skip transaction to use this method from within an already opened transaction
      *
      * @return boolean True on success, False on error
      */
-    public function delete_message($uids, $folder = null) {
+    public function delete_message($uids, $folder = NULL, $skip_transaction = FALSE) {
 
         if (!strlen($folder)) {
             $folder = $this->folder;
+        }
+
+        // folder exists?
+        $mailbox_idnr = $this->get_mail_box_id($folder);
+        if (!$mailbox_idnr) {
+            return FALSE;
         }
 
         // format supplied message UIDs list
@@ -1241,38 +1332,74 @@ class rcube_dbmail extends rcube_storage {
         }
 
         // start transaction
-        if (!$this->dbmail->startTransaction()) {
+        if (!$skip_transaction && !$this->dbmail->startTransaction()) {
             return FALSE;
         }
 
         foreach ($message_uids as $message_uid) {
 
-            $query = "SELECT dbmail_physmessage.messagesize FROM dbmail_physmessage, dbmail_messages
-                        WHERE dbmail_messages.message_idnr = " . $message_uid . "
-                        AND   dbmail_physmessage.id = dbmail_messages.physmessage_id";
-
-            $res = $this->dbmail->query($query);
-            if ($this->dbmail->num_rows($res) == 1) {
-                $row = $this->dbmail->fetch_assoc($res);
-                $size = $row["messagesize"];
-            } else
-                $size = 0;
-
-            $query = "DELETE FROM dbmail_messages "
-                    . " WHERE message_idnr = {$this->dbmail->escape($message_uid)} ";
-
-            if (!$this->dbmail->query($query)) {
-                // rollbalk transaction
-                $this->dbmail->rollbackTransaction();
+            // retrive message record
+            $message_metadata = $this->get_message_record($message_uid);
+            if (!$message_metadata) {
+                // not found
+                if (!$skip_transaction) {
+                    $this->dbmail->rollbackTransaction();
+                }
                 return FALSE;
             }
 
-            $this->decrement_user_quota($this->user_idnr, $size);
+            // retrive physmessage record
+            $physmessage_id = $message_metadata['physmessage_id'];
+            $physmessage_metadata = $this->get_physmessage_record($physmessage_id);
+            if (!$physmessage_metadata) {
+                // not found
+                if (!$skip_transaction) {
+                    $this->dbmail->rollbackTransaction();
+                }
+                return FALSE;
+            }
+
+            $query = "DELETE FROM dbmail_messages "
+                    . " WHERE  message_idnr = {$this->dbmail->escape($message_uid)}";
+
+            if (!$this->dbmail->query($query)) {
+                // rollbalk transaction
+                if (!$skip_transaction) {
+                    $this->dbmail->rollbackTransaction();
+                }
+                return FALSE;
+            }
+
+            // delete physmessage cached records (if not deduplicated)
+            if (!$this->clear_physmessage_cache($physmessage_id, $message_uid)) {
+                if (!$skip_transaction) {
+                    $this->dbmail->rollbackTransaction();
+                }
+                return FALSE;
+            }
+
+            // decrement user quota
+            if (!$this->decrement_user_quota($this->user_idnr, $physmessage_metadata['messagesize'])) {
+                if (!$skip_transaction) {
+                    $this->dbmail->rollbackTransaction();
+                }
+                return FALSE;
+            }
         }
 
-        $this->increment_mailbox_seq($this->get_mail_box_id($folder));
+        if (!$this->increment_mailbox_seq($mailbox_idnr)) {
+            if (!$skip_transaction) {
+                $this->dbmail->rollbackTransaction();
+            }
+            return FALSE;
+        }
 
-        return ($this->dbmail->endTransaction() ? TRUE : FALSE);
+
+        if (!$skip_transaction && !$this->dbmail->endTransaction()) {
+            return FALSE;
+        } else {
+            return TRUE;
+        }
     }
 
     /**
@@ -1290,6 +1417,12 @@ class rcube_dbmail extends rcube_storage {
             $folder = $this->folder;
         }
 
+        // folder exists?
+        $mailbox_idnr = $this->get_mail_box_id($folder);
+        if (!$mailbox_idnr) {
+            return FALSE;
+        }
+
         // format supplied message UIDs list - THIRD PARAMETER enable deleted_flag check
         $message_uids = $this->list_message_UIDs($uids, $folder, TRUE);
         if (!$message_uids) {
@@ -1303,20 +1436,25 @@ class rcube_dbmail extends rcube_storage {
 
         foreach ($message_uids as $message_uid) {
 
-            $query = "SELECT dbmail_physmessage.messagesize FROM dbmail_physmessage, dbmail_messages
-                        WHERE dbmail_messages.message_idnr = " . $message_uid . "
-                        AND   dbmail_physmessage.id = dbmail_messages.physmessage_id";
+            // retrive message record
+            $message_metadata = $this->get_message_record($message_uid);
+            if (!$message_metadata) {
+                // not found
+                $this->dbmail->rollbackTransaction();
+                return FALSE;
+            }
 
-            $res = $this->dbmail->query($query);
-            if ($this->dbmail->num_rows($res) == 1) {
-                $row = $this->dbmail->fetch_assoc($res);
-                $size = $row["messagesize"];
-            } else
-                $size = 0;
+            // retrive physmessage record
+            $physmessage_id = $message_metadata['physmessage_id'];
+            $physmessage_metadata = $this->get_physmessage_record($physmessage_id);
+            if (!$physmessage_metadata) {
+                // not found
+                $this->dbmail->rollbackTransaction();
+                return FALSE;
+            }
 
             $query = "DELETE FROM dbmail_messages "
-                    . " WHERE message_idnr = {$this->dbmail->escape($message_uid)} "
-                    . " AND deleted_flag = 1";  // Just a double check, list_message_should return only deleted ones
+                    . " WHERE  message_idnr = {$this->dbmail->escape($message_uid)}";
 
             if (!$this->dbmail->query($query)) {
                 // rollbalk transaction
@@ -1324,10 +1462,17 @@ class rcube_dbmail extends rcube_storage {
                 return FALSE;
             }
 
-            $this->decrement_user_quota($this->user_idnr, $size);
+            // decrement user quota
+            if (!$this->decrement_user_quota($this->user_idnr, $physmessage_metadata['messagesize'])) {
+                $this->dbmail->rollbackTransaction();
+                return FALSE;
+            }
         }
 
-        $this->increment_mailbox_seq($this->get_mail_box_id($folder));
+        if (!$this->increment_mailbox_seq($mailbox_idnr)) {
+            $this->dbmail->rollbackTransaction();
+            return FALSE;
+        }
 
         return ($this->dbmail->endTransaction() ? TRUE : FALSE);
     }
@@ -1340,6 +1485,7 @@ class rcube_dbmail extends rcube_storage {
      * @return array Two elements array with UIDs converted to list and ALL flag
      */
     protected function parse_uids($uids) {
+
         if ($uids === '*' || $uids === '1:*') {
             if (empty($this->search_set)) {
                 $uids = '1:*';
@@ -1658,22 +1804,34 @@ class rcube_dbmail extends rcube_storage {
                         . " set name = '{$this->dbmail->escape($new_sub_folder_name)}' "
                         . " WHERE mailbox_idnr = {$this->dbmail->escape($sub_folder_idnr)} ";
 
-                // rename sub-folder and increment 'seq' flag
-                if (!$this->dbmail->query($query) || !$this->increment_mailbox_seq($sub_folder_idnr)) {
+                // rename sub-folder
+                if (!$this->dbmail->query($query)) {
                     // rollbalk transaction
+                    $this->dbmail->rollbackTransaction();
+                    return FALSE;
+                }
+
+                // increment folder 'seq' flag
+                if (!$this->increment_mailbox_seq($sub_folder_idnr)) {
                     $this->dbmail->rollbackTransaction();
                     return FALSE;
                 }
             }
         }
 
-        // rename target folder and increment 'seq' flag
+        // rename target folder
         $query = "UPDATE dbmail_mailboxes "
                 . " set name = '{$this->dbmail->escape($new_name)}' "
                 . " WHERE mailbox_idnr = {$this->dbmail->escape($mailbox_idnr)} ";
 
-        if (!$this->dbmail->query($query) || !$this->increment_mailbox_seq($mailbox_idnr)) {
+        if (!$this->dbmail->query($query)) {
             // rollbalk transaction
+            $this->dbmail->rollbackTransaction();
+            return FALSE;
+        }
+
+        // increment folder 'seq' flag
+        if (!$this->increment_mailbox_seq($mailbox_idnr)) {
             $this->dbmail->rollbackTransaction();
             return FALSE;
         }
@@ -1711,7 +1869,14 @@ class rcube_dbmail extends rcube_storage {
             // delete children
             foreach ($sub_folders as $sub_folder_idnr => $sub_folder_name) {
 
-                // rename sub folder
+                // delete sub folder messages
+                if (!$this->delete_message('*', $sub_folder_name, TRUE)) {
+                    // error while deleting subfolder messages
+                    $this->dbmail->rollbackTransaction();
+                    return FALSE;
+                }
+
+                // delete sub folder
                 $query = "DELETE FROM dbmail_mailboxes "
                         . " WHERE mailbox_idnr = {$this->dbmail->escape($sub_folder_idnr)} ";
 
@@ -1721,6 +1886,13 @@ class rcube_dbmail extends rcube_storage {
                     return FALSE;
                 }
             }
+        }
+
+        // delete folder messages
+        if (!$this->delete_message('*', $folder, TRUE)) {
+            // error while deleting folder messages
+            $this->dbmail->rollbackTransaction();
+            return FALSE;
         }
 
         // delete folder
@@ -1826,32 +1998,33 @@ class rcube_dbmail extends rcube_storage {
      */
     public function folder_attributes($folder, $force = false) {
 
-        $mailbox_idnr = $this->get_mail_box_id($folder);
-
-        $query = " SELECT seen_flag, answered_flag, deleted_flag, flagged_flag, recent_flag, draft_flag, no_inferiors, no_select"
-                . " FROM dbmail_mailboxes "
-                . " WHERE mailbox_idnr = {$this->dbmail->escape($mailbox_idnr)} ";
-
-        $res = $this->dbmail->query($query);
-        $row = $this->dbmail->fetch_assoc($res);
-
-        $result = array();
-
-        if (!empty($row)) {
-
-            $result = array(
-                'seen' => $row['seen_flag'],
-                'answered' => $row['answered_flag'],
-                'deleted' => $row['deleted_flag'],
-                'flagged' => $row['flagged_flag'],
-                'recent' => $row['recent_flag'],
-                'draft' => $row['draft_flag'],
-                '\\Noselect' => $row['no_select']
-            );
+        if (!strlen($folder)) {
+            $folder = $this->folder;
         }
 
+        // folder exists?
+        $mailbox_idnr = $this->get_mail_box_id($folder);
+        if (!$mailbox_idnr) {
+            // not found
+            return FALSE;
+        }
 
-        return $result;
+        // retrive folder record
+        $mailbox_metadata = $this->get_folder_record($mailbox_idnr);
+        if (!$mailbox_metadata) {
+            // not found
+            return FALSE;
+        }
+
+        return array(
+            'seen' => $mailbox_metadata['seen_flag'],
+            'answered' => $mailbox_metadata['answered_flag'],
+            'deleted' => $mailbox_metadata['deleted_flag'],
+            'flagged' => $mailbox_metadata['flagged_flag'],
+            'recent' => $mailbox_metadata['recent_flag'],
+            'draft' => $mailbox_metadata['draft_flag'],
+            '\\Noselect' => $mailbox_metadata['no_select']
+        );
     }
 
     /**
@@ -2509,7 +2682,7 @@ class rcube_dbmail extends rcube_storage {
     }
 
     /**
-     * Search for a specific header name within supplied headers list
+     * Search for a specific header name within supplied headers list (case insensitive match!!!!!)
      * 
      * @param string $header headers list
      * @param string $token header name 
@@ -2669,8 +2842,6 @@ class rcube_dbmail extends rcube_storage {
         }
 
         $rcmh->structure = $this->get_structure($mime_decoded);
-
-        //$rcmh->bodystructure = $this->get_bodystructure($decoded);
 
         return $rcmh;
     }
@@ -3011,16 +3182,7 @@ class rcube_dbmail extends rcube_storage {
                     $filter_join_headers_table = TRUE;
 
                     $header_id = $this->get_header_id_by_header_name('x-priority');
-                    /*
-                      $formatted_filter[] = " "
-                      . " ( "
-                      . "     filter_dbmail_header.headername_id = '{$this->dbmail->escape($header_id)}' "
-                      . "     AND filter_dbmail_headervalue.headervalue <> 1 "
-                      . "     AND filter_dbmail_headervalue.headervalue <> 2 "
-                      . "     AND filter_dbmail_headervalue.headervalue <> 3 "
-                      . "     AND filter_dbmail_headervalue.headervalue <> 5 "
-                      . " ) ";
-                     */
+
                     $formatted_filter[] = " "
                             . " ( "
                             . "    filter_dbmail_header.headername_id = '{$this->dbmail->escape($header_id)}' "
@@ -3389,102 +3551,6 @@ class rcube_dbmail extends rcube_storage {
         return $rcube_message_part;
     }
 
-    private function get_bodystructure($structure) {
-
-        $response = array();
-
-        if (count($structure->parts) > 0) {
-
-            /* RFC3501: BODYSTRUCTURE fields of multipart part
-              part1 array
-              part2 array
-              part3 array
-              ....
-              1. subtype
-              2. parameters (optional)
-              3. description (optional)
-              4. language (optional)
-              5. location (optional)
-             */
-            $index = 0;
-
-            foreach ($structure->parts as $part) {
-                $response[$index] = $this->get_bodystructure($part);
-                $index++;
-            }
-
-            $response[$index] = $structure->ctype_secondary; // subtype
-            $index++;
-
-            foreach ($structure->ctype_parameters as $key => $value) {
-                $response[$index][] = $key;
-                $response[$index][] = $value;
-            }
-            $index++;
-
-            $response[$index] = NULL; // description (optional)
-            $index++;
-
-            $response[$index] = NULL; // language (optional)
-            $index++;
-
-            $response[$index] = NULL; // location (optional)
-            $index++;
-        } else {
-
-            /* RFC3501: BODYSTRUCTURE fields of non-multipart part
-              0. type
-              1. subtype
-              2. parameters
-              3. id
-              4. description
-              5. encoding
-              6. size
-              -- text
-              7. lines
-              -- message/rfc822
-              7. envelope structure
-              8. body structure
-              9. lines
-              --
-              x. md5 (optional)
-              x. disposition (optional)
-              x. language (optional)
-              x. location (optional)
-             */
-
-            /*
-              0 => string 'message' (length=7)
-              1 => string 'rfc822' (length=6)
-             */
-
-            $response[0] = $structure->ctype_primary;
-            $response[1] = $structure->ctype_secondary;
-
-            foreach ($structure->ctype_parameters as $key => $value) {
-                $response[2][] = $key;
-                $response[2][] = $value;
-            }
-
-            $response[3] = NULL; // id
-            $response[4] = NULL; // description
-            $response[5] = (array_key_exists('content-transfer-encoding', $structure->headers) ? $structure->headers['content-transfer-encoding'] : '8bit'); // encoding
-            $response[6] = strlen($structure->body); // size
-
-            if ($structure->ctype_primary == 'text') {
-                $response[7] = count(explode("\n", $structure->body)); //lines
-                $response[8] = NULL; // md5 (optional)
-                $response[9] = NULL; // disposition (optional)
-                $response[10] = NULL; // language (optional)
-                $response[11] = NULL; // location (optional)
-            } elseif ($structure->ctype_primary == 'message' && $structure->ctype_secondary == 'rfc822') {
-                
-            }
-        }
-
-        return $response;
-    }
-
     /**
      * Return passed mime part
      * @param stdClass $mime_decoded
@@ -3542,66 +3608,6 @@ class rcube_dbmail extends rcube_storage {
         return $part_key;
     }
 
-    /** Functions ported from DBMAIL -- with direct reference to original names * */
-    /**
-     * Insert a physical message into the database
-     * 
-     * @ref static void insert_physmessage(DbmailMessage *self, Connection_T c)
-     * @param string $DbmailMessage The message to insert
-     * 
-     * @return int $physmessageID  the inserted message ID of FALSE on error
-     */
-    /*
-      private function insert_physmessage($DbmailMessage) {
-
-      $query = "INSERT INTO dbmail_physmessage SET "
-      . "    messagesize   = " . strlen($DbmailMessage) . ", "
-      . "    rfcsize       = " . strlen($DbmailMessage) . ", "
-      . "    internal_date = NOW()";
-
-      if (!$this->dbmail->query($query))
-      return FALSE;
-      else
-      return $this->dbmail->insert_id('dbmail_physmessage');
-      }
-     */
-
-    /**
-     * Insert a logical message into the database
-     *
-     * @ref int _message_insert(DbmailMessage *self, uint64_t user_idnr, const char *mailbox, const char *unique_id)
-     * @param string $DbmailMessage The message to insert
-     * @param int $user_idnr User ID
-     * @param int $mailbox_idnr The destination folder identifier
-     * @param string $unique_id The unique id to use for this message
-     * 
-     * @return message references array or FALSE on error
-     */
-    /*
-      private function _message_insert($DbmailMessage, $user_idnr, $mailbox_idnr, $unique_id) {
-
-
-
-      $physmessage_id = $this->insert_physmessage($DbmailMessage);
-      if ($physmessage_id === FALSE) {
-      return FALSE;
-      }
-
-      $query = "INSERT INTO dbmail_messages SET "
-      . "     mailbox_idnr = {$this->dbmail->escape($mailbox_idnr)},  "
-      . "     physmessage_id = {$this->dbmail->escape($physmessage_id)},  "
-      . "     unique_id = '{$this->dbmail->escape($unique_id)}', "
-      . "     recent_flag = 1, "
-      . "     status = {$this->dbmail->escape(SELF::MESSAGE_STATUS_NEW)}";
-
-      $status["message_id"] = $this->dbmail->insert_id('dbmail_messages');
-      $status["physmessage_id"] = $physmessage_id;
-
-
-      return ($this->dbmail->query($query) ? $status : FALSE );
-      }
-     */
-
     /**
      * return hashes string
      * @param string $string the source string
@@ -3658,12 +3664,12 @@ class rcube_dbmail extends rcube_storage {
 
         ## Enable debug as you please by changing this to TRUE
         if (FALSE) {
-            console("Part Insert, physmessage id: ".$physmessage_id);
-            console("Part Insert, is header:      ".$is_header);
-            console("Part Insert, part key:       ".$part_key);
-            console("Part Insert, part depth:     ".$part_depth);
-            console("Part Insert, part order:     ".$part_order);
-            console("Part Insert, hash:           ".$hash);
+            console("Part Insert, physmessage id: " . $physmessage_id);
+            console("Part Insert, is header:      " . $is_header);
+            console("Part Insert, part key:       " . $part_key);
+            console("Part Insert, part depth:     " . $part_depth);
+            console("Part Insert, part order:     " . $part_order);
+            console("Part Insert, hash:           " . $hash);
         }
 
         // blob exists?
@@ -3732,26 +3738,29 @@ class rcube_dbmail extends rcube_storage {
      * Function to exract the RAW Headers of a message
      * It simply read the message up to the first empty new line
      * Partially stolen from https://github.com/plancake/official-library-php-email-parser
+     * 
+     * NOTE: PEAR Mail_mimeDecode returns lowercased headers name, so we use 
+     * this method to get real message headers
      *
      * @param string $input the message to parse
      *
      * @return string $raw_header the message headers
      */
-    
-      private function extract_raw_headers_from_message($input) {
+    private function extract_raw_headers_from_message($input) {
 
-	$lines = preg_split("/(\r?\n|\r)/", $input);
+        $lines = preg_split("/(\r?\n|\r)/", $input);
 
-	$raw_header = '';
+        $raw_header = '';
 
-	foreach ($lines as $line) {
-		if (strlen(trim($line)) > 0) $raw_header .= $line . PHP_EOL;
-		else break;
-	}
+        foreach ($lines as $line) {
+            if (strlen(trim($line)) > 0)
+                $raw_header .= $line . "\n";
+            else
+                break;
+        }
 
-	return $raw_header;
-      }
-     
+        return $raw_header;
+    }
 
     /**
      * Store supplied part item
@@ -3827,42 +3836,6 @@ class rcube_dbmail extends rcube_storage {
 
         return TRUE;
     }
-
-    /**
-     * Function to store a message, splitted in mime parts, into the Database
-     *
-     * @param string $message the message to store
-     *
-     * @return bool true on success, false on error
-     */
-    /*
-      private function dm_message_store($message, $physmessage_id) {
-
-      console("DM Message Store");
-
-      $part_key = 1;
-      $part_depth = 0;
-      $part_order = 0;
-
-      $raw_header = $this->extract_raw_headers_from_message($message);
-
-      console($raw_header);
-
-      $status = $this->_part_insert($physmessage_id, $raw_header, 1, $part_key, $part_depth, $part_order); // This is the fist piece of message
-      if ($status === FALSE)
-      return FALSE;
-
-      $mime_decoded = $this->decode_raw_message($message, FALSE);
-      if (!$mime_decoded)
-      return FALSE;
-
-      $status = $this->store_mime_object($physmessage_id, $mime_decoded, $part_key, $part_depth, 1);
-      if ($status === FALSE)
-      return FALSE;
-
-      return TRUE;
-      }
-     */
 
     /**
      * Increment user quota
@@ -4021,7 +3994,7 @@ class rcube_dbmail extends rcube_storage {
     /**
      * Retrive mail envelope headers
      * @param string $raw_headers raw headers
-     * @return array
+     * @return string formatted dbmail envelope headers
      */
     private function get_mail_envelope_headers($raw_headers) {
 
@@ -4037,221 +4010,86 @@ class rcube_dbmail extends rcube_storage {
         /* message-id */
 
         $date = $this->get_header_value($raw_headers, 'date');
-        if ($date) {
-            $date = '"' . $date . '"';
-        } else {
-            $date = 'NIL';
-        }
+        // format 'date'
+        $date = ($date ? '"' . $date . '"' : 'NIL');
 
         $subject = $this->get_header_value($raw_headers, 'subject');
-        if ($subject) {
-            $subject = '"' . $subject . '"';
-        } else {
-            $subject = 'NIL';
-        }
+        // format 'date'
+        $subject = ($subject ? '"' . $subject . '"' : 'NIL');
 
-        $from = $this->get_header_value($raw_headers, 'from');
-        if ($from) {
+        $from = $this->decode_mail_envelope_address($this->get_header_value($raw_headers, 'from'));
+        $sender = $this->decode_mail_envelope_address($this->get_header_value($raw_headers, 'x-sender'));
+        $reply_to = $this->decode_mail_envelope_address($this->get_header_value($raw_headers, 'reply-to'));
 
-            // could be 'maxpower@homer.com' or 'Max Power <maxpower@homer.com>' or FALSE if not found
-
-            $pos = strpos($from, '<');
-
-            if ($pos !== false) {
-                // alias found
-                $alias = substr($from, 0, ($pos - 1));
-                $address = substr($from, ($pos + 1), (strlen($from) - 2));
-
-                list($user, $domain) = explode('@', $address);
-
-                $from = '(("' . $alias . '" NIL "' . $user . '" "' . $domain . '"))';
-            } else {
-
-                list($user, $domain) = explode('@', $from);
-
-                $from = '((NIL NIL "' . $user . '" "' . $domain . '"))';
-            }
-        } else {
-            $from = 'NIL';
-        }
-
-        $sender = $this->get_header_value($raw_headers, 'x-sender');
-        if ($sender) {
-
-            // could be 'maxpower@homer.com' or 'Max Power <maxpower@homer.com>' or FALSE if not found
-
-            $pos = strpos($sender, '<');
-
-            if ($pos !== false) {
-                // alias found
-                $alias = substr($sender, 0, ($pos - 1));
-                $address = substr($sender, ($pos + 1), (strlen($sender) - 2));
-
-                list($user, $domain) = explode('@', $address);
-
-                $sender = '(("' . $alias . '" NIL "' . $user . '" "' . $domain . '"))';
-            } else {
-
-                list($user, $domain) = explode('@', $sender);
-
-                $sender = '((NIL NIL "' . $user . '" "' . $domain . '"))';
-            }
-        } else {
-            $sender = 'NIL';
-        }
-
-        $reply_to = $this->get_header_value($raw_headers, 'reply-to');
-        if ($reply_to) {
-
-            // could be 'maxpower@homer.com' or 'Max Power <maxpower@homer.com>' or FALSE if not found
-
-            $pos = strpos($reply_to, '<');
-
-            if ($pos !== false) {
-                // alias found
-                $alias = substr($reply_to, 0, ($pos - 1));
-                $address = substr($reply_to, ($pos + 1), (strlen($reply_to) - 2));
-
-                list($user, $domain) = explode('@', $address);
-
-                $reply_to = '(("' . $alias . '" NIL "' . $user . '" "' . $domain . '"))';
-            } else {
-
-                list($user, $domain) = explode('@', $reply_to);
-
-                $reply_to = '((NIL NIL "' . $user . '" "' . $domain . '"))';
-            }
-        } else {
-            $reply_to = 'NIL';
-        }
-
-        $to = $this->get_header_value($raw_headers, 'to');
-        if ($to) {
-
-            // could be 'maxpower@homer.com' or 'Max Power <maxpower@homer.com>' or FALSE if not found
-
-            $pos = strpos($to, '<');
-
-            if ($pos !== false) {
-                // alias found
-                $alias = substr($to, 0, ($pos - 1));
-                $address = substr($to, ($pos + 1), (strlen($to) - 2));
-
-                list($user, $domain) = explode('@', $address);
-
-                $to = '(("' . $alias . '" NIL "' . $user . '" "' . $domain . '"))';
-            } else {
-
-                list($user, $domain) = explode('@', $to);
-
-                $to = '((NIL NIL "' . $user . '" "' . $domain . '"))';
-            }
-        } else {
-            $to = 'NIL';
-        }
-
-        $cc = $this->get_header_value($raw_headers, 'cc');
-        if ($cc) {
-
-            // could be 'maxpower@homer.com' or 'Max Power <maxpower@homer.com>' or FALSE if not found
-
-            $pos = strpos($cc, '<');
-
-            if ($pos !== false) {
-                // alias found
-                $alias = substr($cc, 0, ($pos - 1));
-                $address = substr($cc, ($pos + 1), (strlen($cc) - 2));
-
-                list($user, $domain) = explode('@', $address);
-
-                $cc = '(("' . $alias . '" NIL "' . $user . '" "' . $domain . '"))';
-            } else {
-
-                list($user, $domain) = explode('@', $cc);
-
-                $cc = '((NIL NIL "' . $user . '" "' . $domain . '"))';
-            }
-        } else {
-            $cc = 'NIL';
-        }
-
-        $bcc = $this->get_header_value($raw_headers, 'bcc');
-        if ($bcc) {
-
-            // could be 'maxpower@homer.com' or 'Max Power <maxpower@homer.com>' or FALSE if not found
-
-            $pos = strpos($bcc, '<');
-
-            if ($pos !== false) {
-                // alias found
-                $alias = substr($bcc, 0, ($pos - 1));
-                $address = substr($bcc, ($pos + 1), (strlen($bcc) - 2));
-
-                list($user, $domain) = explode('@', $address);
-
-                $bcc = '(("' . $alias . '" NIL "' . $user . '" "' . $domain . '"))';
-            } else {
-
-                list($user, $domain) = explode('@', $bcc);
-
-                $bcc = '((NIL NIL "' . $user . '" "' . $domain . '"))';
-            }
-        } else {
-            $bcc = 'NIL';
-        }
-
-        $in_reply_to = $this->get_header_value($raw_headers, 'in-reply-to');
-        if ($in_reply_to) {
-
-            // could be 'maxpower@homer.com' or 'Max Power <maxpower@homer.com>' or FALSE if not found
-
-            $pos = strpos($in_reply_to, '<');
-
-            if ($pos !== false) {
-                // alias found
-                $alias = substr($in_reply_to, 0, ($pos - 1));
-                $address = substr($in_reply_to, ($pos + 1), (strlen($to) - 2));
-
-                list($user, $domain) = explode('@', $address);
-
-                $in_reply_to = '(("' . $alias . '" NIL "' . $user . '" "' . $domain . '"))';
-            } else {
-
-                list($user, $domain) = explode('@', $in_reply_to);
-
-                $in_reply_to = '((NIL NIL "' . $user . '" "' . $domain . '"))';
-            }
-        } else {
-            $in_reply_to = 'NIL';
-        }
+        $to = $this->decode_mail_envelope_address($this->get_header_value($raw_headers, 'to'));
+        $cc = $this->decode_mail_envelope_address($this->get_header_value($raw_headers, 'cc'));
+        $bcc = $this->decode_mail_envelope_address($this->get_header_value($raw_headers, 'bcc'));
+        $in_reply_to = $this->decode_mail_envelope_address($this->get_header_value($raw_headers, 'in-reply-to'));
 
         $message_id = $this->get_header_value($raw_headers, 'message-id');
-        if ($message_id) {
-            $message_id = '"' . $message_id . '"';
-        } else {
-            $message_id = 'NIL';
-        }
+        // format '$message_id'
+        $message_id = ($message_id ? '"' . $message_id . '"' : 'NIL');
 
-        $envelope_headers = array(
-            $date,
-            $subject,
-            $from,
-            $sender,
-            $reply_to,
-            $to,
-            $cc,
-            $bcc,
-            $in_reply_to,
-            $message_id
-        );
+
+        $envelope_headers = "(";
+        $envelope_headers .= "{$date} ";
+        $envelope_headers .= "{$subject} ";
+        $envelope_headers .= "{$from} ";
+        $envelope_headers .= "{$sender} ";
+        $envelope_headers .= "{$reply_to} ";
+        $envelope_headers .= "{$to} ";
+        $envelope_headers .= "{$cc} ";
+        $envelope_headers .= "{$bcc} ";
+        $envelope_headers .= "{$in_reply_to} ";
+        $envelope_headers .= "{$message_id}";
+        $envelope_headers .= ")";
 
         return $envelope_headers;
     }
 
     /**
+     * Format supplied mail address according to dbmail envelope structure
+     */
+    private function decode_mail_envelope_address($address) {
+
+        $decoded_address = '';
+
+        if (strlen($address) > 0) {
+
+            // '$address' could be 'maxpower@homer.com' or 'Max Power <maxpower@homer.com>' or FALSE if not found
+
+            $pos = strpos($address, '<');
+
+            if ($pos !== false) {
+
+                // alias found - split alias, user and domain
+
+                $alias = substr($address, 0, ($pos - 1));
+                $address = substr($address, ($pos + 1), (strlen($address) - 2));
+
+                list($user, $domain) = explode('@', $address);
+
+                $decoded_address = '(("' . $alias . '" NIL "' . $user . '" "' . $domain . '"))';
+            } else {
+
+                // alias not found - split user and domain
+
+                list($user, $domain) = explode('@', $address);
+
+                $decoded_address = '((NIL NIL "' . $user . '" "' . $domain . '"))';
+            }
+        } else {
+            // nothing found
+            $decoded_address = 'NIL';
+        }
+
+        return $decoded_address;
+    }
+
+    /**
      * Store mail evelope headers
      * @param int $physmessage_id
-     * @param array $envelope_headers
+     * @param string formatted dbmail envelope headers
      * @return boolean True on success, False on failure
      */
     private function save_mail_envelope_headers($physmessage_id, $envelope_headers) {
@@ -4269,8 +4107,85 @@ class rcube_dbmail extends rcube_storage {
                 . " VALUES "
                 . " ( "
                 . "    '{$this->dbmail->escape($physmessage_id)}', "
-                . "    '{$this->dbmail->escape(implode(" ", $envelope_headers))}' "
+                . "    '{$this->dbmail->escape($envelope_headers)}' "
                 . " ) ";
+
+        return ($this->dbmail->query($query) ? TRUE : FALSE);
+    }
+
+    /**
+     * Delete physmessage related cached records (deduplication aware!!!!!!)
+     * @param int $physmessage_id 
+     * @param int $message_idnr
+     * @return boolean True on success, False on failure
+     */
+    private function clear_physmessage_cache($physmessage_id, $message_idnr = NULL) {
+
+        /**
+         * Check deduplication status if $message_idnr is supplied 
+         */
+        if (strlen($message_idnr) > 0) {
+
+            $query = "SELECT COUNT(*) as occurrences_count "
+                    . " FROM dbmail_messages "
+                    . " WHERE physmessage_id = '{$this->dbmail->escape($physmessage_id)}' "
+                    . " AND message_idnr <> '{$this->dbmail->escape($message_idnr)}' "
+                    . " AND deleted_flag = 0 ";
+
+            $res = $this->dbmail->query($query);
+            if (!$res) {
+                // error
+                return FALSE;
+            }
+
+            if ($this->dbmail->num_rows($res) > 0) {
+                // physmessage used by one or more messages - skip 
+                return TRUE;
+            }
+        }
+
+        /**
+         * Delete dbmail_envelope record
+         */
+        $query = "DELETE FROM dbmail_envelope"
+                . " WHERE physmessage_id = '{$this->dbmail->escape($physmessage_id)}' ";
+
+        if (!$this->dbmail->query($query)) {
+            // error
+            return FALSE;
+        }
+
+        /**
+         * Delete dbmail_headers
+         */
+        // loop header name / values relations
+        $query = "SELECT headervalue_id "
+                . " FROM dbmail_header "
+                . " WHERE physmessage_id = '{$this->dbmail->escape($physmessage_id)}' ";
+
+        $res = $this->dbmail->query($query);
+        if (!$res) {
+            // error
+            return FALSE;
+        }
+
+        while ($row = $this->dbmail->fetch_assoc($res)) {
+
+            /*
+             * 1 - delete dbmail_headervalue record
+             * 2 - keep dbmail_headername record
+             */
+            $query = "DELETE FROM dbmail_headervalue "
+                    . " WHERE id = '{$this->dbmail->escape($row['headervalue_id'])}' ";
+
+            if (!$this->dbmail->query($query)) {
+                // error
+                return FALSE;
+            }
+        }
+
+        $query = "DELETE FROM dbmail_header "
+                . " WHERE physmessage_id = '{$this->dbmail->escape($physmessage_id)}' ";
 
         return ($this->dbmail->query($query) ? TRUE : FALSE);
     }
