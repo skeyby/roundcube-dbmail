@@ -17,6 +17,13 @@
  * Use the official PEAR Mail_mimeDecode library, changing following line in 'composer.json'
  * change  "pear/mail_mime-decode": ">=1.5.5",
  * to      "pear-pear.php.net/Mail_mimeDecode": ">=1.5.5",
+ * 
+ * ----------------------------
+ * 
+ * Notes:
+ * 
+ * 1. DBMAIL nightly cleanup every cached data (envelope / headers) for deleted
+ *    messages, so we don't need to manually delete those records
  */
 class rcube_dbmail extends rcube_storage {
 
@@ -1530,14 +1537,6 @@ class rcube_dbmail extends rcube_storage {
                 return FALSE;
             }
 
-            // delete physmessage cached records (if not deduplicated)
-            if (!$this->clear_physmessage_cache($physmessage_id, $message_uid)) {
-                if (!$skip_transaction) {
-                    $this->dbmail->rollbackTransaction();
-                }
-                return FALSE;
-            }
-
             // decrement user quota
             if (!$this->decrement_user_quota($this->user_idnr, $physmessage_metadata['messagesize'])) {
                 if (!$skip_transaction) {
@@ -1618,12 +1617,6 @@ class rcube_dbmail extends rcube_storage {
 
             if (!$this->dbmail->query($query)) {
                 // rollbalk transaction
-                $this->dbmail->rollbackTransaction();
-                return FALSE;
-            }
-
-            // delete physmessage cached records (if not deduplicated)
-            if ($clear_cache && !$this->clear_physmessage_cache($physmessage_id, $message_uid)) {
                 $this->dbmail->rollbackTransaction();
                 return FALSE;
             }
@@ -3563,7 +3556,7 @@ class rcube_dbmail extends rcube_storage {
             $flagged = $msg['flagged_flag'];
 
             $message_headers = $this->get_physmessage_headers($physmessage_id);
-           
+
             $imploded_headers = '';
             foreach ($message_headers as $header_name => $header_value) {
                 $imploded_headers .= $header_name . $this->get_header_delimiter($header_name) . $header_value . "\n";
@@ -4330,83 +4323,6 @@ class rcube_dbmail extends rcube_storage {
                 . "    '{$this->dbmail->escape($physmessage_id)}', "
                 . "    '{$this->dbmail->escape($envelope_headers)}' "
                 . " ) ";
-
-        return ($this->dbmail->query($query) ? TRUE : FALSE);
-    }
-
-    /**
-     * Delete physmessage related cached records (deduplication aware!!!!!!)
-     * @param int $physmessage_id 
-     * @param int $message_idnr
-     * @return boolean True on success, False on failure
-     */
-    private function clear_physmessage_cache($physmessage_id, $message_idnr = NULL) {
-
-        /**
-         * Check deduplication status if $message_idnr is supplied 
-         */
-        if (strlen($message_idnr) > 0) {
-
-            $query = "SELECT COUNT(*) as occurrences_count "
-                    . " FROM dbmail_messages "
-                    . " WHERE physmessage_id = '{$this->dbmail->escape($physmessage_id)}' "
-                    . " AND message_idnr <> '{$this->dbmail->escape($message_idnr)}' "
-                    . " AND deleted_flag = 0 ";
-
-            $res = $this->dbmail->query($query);
-            if (!$res) {
-                // error
-                return FALSE;
-            }
-
-            if ($this->dbmail->num_rows($res) > 0) {
-                // physmessage used by one or more messages - skip 
-                return TRUE;
-            }
-        }
-
-        /**
-         * Delete dbmail_envelope record
-         */
-        $query = "DELETE FROM dbmail_envelope"
-                . " WHERE physmessage_id = '{$this->dbmail->escape($physmessage_id)}' ";
-
-        if (!$this->dbmail->query($query)) {
-            // error
-            return FALSE;
-        }
-
-        /**
-         * Delete dbmail_headers
-         */
-        // loop header name / values relations
-        $query = "SELECT headervalue_id "
-                . " FROM dbmail_header "
-                . " WHERE physmessage_id = '{$this->dbmail->escape($physmessage_id)}' ";
-
-        $res = $this->dbmail->query($query);
-        if (!$res) {
-            // error
-            return FALSE;
-        }
-
-        while ($row = $this->dbmail->fetch_assoc($res)) {
-
-            /*
-             * 1 - delete dbmail_headervalue record
-             * 2 - keep dbmail_headername record
-             */
-            $query = "DELETE FROM dbmail_headervalue "
-                    . " WHERE id = '{$this->dbmail->escape($row['headervalue_id'])}' ";
-
-            if (!$this->dbmail->query($query)) {
-                // error
-                return FALSE;
-            }
-        }
-
-        $query = "DELETE FROM dbmail_header "
-                . " WHERE physmessage_id = '{$this->dbmail->escape($physmessage_id)}' ";
 
         return ($this->dbmail->query($query) ? TRUE : FALSE);
     }
