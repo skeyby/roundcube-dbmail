@@ -3563,19 +3563,24 @@ class rcube_dbmail extends rcube_storage {
             $flagged = $msg['flagged_flag'];
 
             $message_headers = $this->get_physmessage_headers($physmessage_id);
+           
+            $imploded_headers = '';
+            foreach ($message_headers as $header_name => $header_value) {
+                $imploded_headers .= $header_name . $this->get_header_delimiter($header_name) . $header_value . "\n";
+            }
 
             $rcmh = new rcube_message_header();
-
             $rcmh->id = $msg_index;
             $rcmh->uid = $message_idnr;
+            $rcmh->ctype = $this->get_header_value($imploded_headers, 'content-type');
             $rcmh->folder = $folder;
-            $rcmh->subject = (is_array($message_headers) && array_key_exists('subject', $message_headers) ? $message_headers['subject'] : '');
-            $rcmh->from = (is_array($message_headers) && array_key_exists('from', $message_headers) ? $message_headers['from'] : '');
-            $rcmh->to = (is_array($message_headers) && array_key_exists('to', $message_headers) ? $message_headers['to'] : '');
-            $rcmh->replyto = (is_array($message_headers) && array_key_exists('return-path', $message_headers) ? $message_headers['return-path'] : '');
-            $rcmh->in_reply_to = (is_array($message_headers) && array_key_exists('return-path', $message_headers) ? $message_headers['return-path'] : '');
-            $rcmh->date = (is_array($message_headers) && array_key_exists('date', $message_headers) ? $message_headers['date'] : '');
-            $rcmh->internaldate = (is_array($message_headers) && array_key_exists('date', $message_headers) ? $message_headers['date'] : '');
+            $rcmh->subject = $this->get_header_value($imploded_headers, 'subject');
+            $rcmh->from = $this->get_header_value($imploded_headers, 'from');
+            $rcmh->to = $this->get_header_value($imploded_headers, 'to');
+            $rcmh->replyto = $this->get_header_value($imploded_headers, 'return-path');
+            $rcmh->in_reply_to = $this->get_header_value($imploded_headers, 'return-path');
+            $rcmh->date = $this->get_header_value($imploded_headers, 'date');
+            $rcmh->internaldate = $this->get_header_value($imploded_headers, 'date');
             $rcmh->messageID = "mid:" . $msg_index;
             $rcmh->size = $messagesize;
             $rcmh->timestamp = time();
