@@ -194,17 +194,13 @@ class rcube_dbmail extends rcube_storage {
 
         // supplied password match?
         switch ($row['encryption_type']) {
-            /*
-              case 'md5':
-              // TEST MD5 LOGIN!!!!!!!!
-              $salt = substr($row['passwd'], 0, (strrpos($row['passwd'], '$') + 1));
-              $valid_user = (crypt($pass, $salt) != $row['passwd']);
-              break;
-              case 'md5sum':
-              $valid_user = (md5($pass) == $row['passwd']);
-              break;
-             */
             case 'md5':
+                $salt = substr($row['passwd'], 0, (strrpos($row['passwd'], '$') + 1));
+                $valid_user = (crypt($pass, $salt) == $row['passwd']);
+                break;
+            case 'md5sum':
+                $valid_user = (md5($pass) == $row['passwd']);
+                break;
             case 'sha1':
             case 'sha256':
             case 'sha512':
