@@ -562,9 +562,17 @@ class rcube_dbmail extends rcube_storage {
                 . " FROM dbmail_messages "
                 . " INNER JOIN dbmail_physmessage ON dbmail_messages.physmessage_id = dbmail_physmessage.id AND dbmail_messages.mailbox_idnr = {$this->dbmail->escape($mailbox_idnr)} ";
 
+        //giuseppe
+        if ($mode == 'UNSEEN') {
+             $query .= " and seen_flag=0 ";
+        }
+           
         $query .= " {$additional_joins} ";
         $query .= " {$where_conditions} ";
 
+        //giuseppe
+        //console($query);
+        
         $res = $this->dbmail->query($query);
         $row = $this->dbmail->fetch_assoc($res);
 
@@ -576,6 +584,9 @@ class rcube_dbmail extends rcube_storage {
             $this->set_folder_stats($folder, 'maxuid', ($items_count ? $this->get_latest_message_idnr($folder) : 0));
         }
 
+        //giuseppe
+        //console("items_count: " . $items_count . "mode::: " . $mode);
+        
         return $items_count;
     }
 
@@ -1632,6 +1643,7 @@ class rcube_dbmail extends rcube_storage {
         }
 
         if (!$this->increment_mailbox_seq($mailbox_idnr)) {
+
             $this->dbmail->rollbackTransaction();
             return FALSE;
         }
@@ -2923,6 +2935,7 @@ class rcube_dbmail extends rcube_storage {
             // split row by ';' to manage multiple key=>value pairs within same row
             $items = explode(';', $row);
 
+            
             foreach ($items as &$item) {
 
                 $item = trim($item);
@@ -3646,9 +3659,13 @@ class rcube_dbmail extends rcube_storage {
             $mimeParts[] = $row;
         }
 
+        
+      
         $depth = 0;
+        $prevdepth = 0;
         $finalized = false;
         $is_header = true;
+        $prev_header = true;
         $got_boundary = false;
         $prev_boundary = false;
         $prev_is_message = false;
@@ -3662,18 +3679,20 @@ class rcube_dbmail extends rcube_storage {
 
         foreach ($mimeParts as $mimePart) {
 
-            $prevdepth = $depth;
-            $prev_header = $is_header;
-
             $depth = $mimePart['part_depth'];
             $is_header = $mimePart['is_header'];
             $blob = $mimePart['data'];
 
+//            console("Depth ".$depth." [".$prevdepth."] - Header ".$is_header." [".$prev_header."]");
+                        
             if ($is_header) {
                 $prev_boundary = $got_boundary;
-                $prev_is_message = $is_message;
+//                $prev_is_message = $is_message;
 
                 $is_message = preg_match('~content-type:\s+message/rfc822\b~i', $blob);
+                
+                
+//                console("111111->". $blob);
             }
 
             $got_boundary = false;
@@ -3685,56 +3704,105 @@ class rcube_dbmail extends rcube_storage {
                 $blist[$depth] = $boundary;
             }
 
+
+            /*
+             * Code to handle the end of a mime part
+             * 
+             *  Testing if:
+             *  - Previous part was initial part
+             *  - This part is deeper than the previous (otherwise this part is finalized and the boundary is scrapped)
+             *  - If a Boundary has been found
+             */
             while (($prevdepth > 0) && ($prevdepth - 1 >= $depth) && $blist[$prevdepth - 1]) {
                 $body .= $newline . "--" . $blist[$prevdepth - 1] . "--" . $newline;
                 unset($blist[$prevdepth - 1]);
                 $prevdepth--;
                 $finalized = true;
+                //console("È finito la parte, torniamo su");
             }
-
 
             if (($depth > 0) && (!empty($blist[$depth - 1]))) {
                 $boundary = $blist[$depth - 1];
             }
 
+
+            /*
+             * Code to handle the end of the body
+             */           
             if ($is_header && (!$prev_header || $prev_boundary || ($prev_header && $depth > 0 && !$prev_is_message))) {
                 //if ($is_header && (!$prev_header || $prev_boundary || ($prev_header && $depth > 0 && $prev_is_message))) {
                 if ($prevdepth > 0) {
                     $body .= $newline;
                 }
                 $body .= "--" . $boundary . $newline;
+
+
+                //console("È finito il body!");
+
             }
 
-            if ($prev_is_message) {
-                $body .= $newline;
-            }
-
-            if (!$is_header && $prev_header) {
-                $body .= $newline;
-            }
-
+            
+            
+            /*
+             * Let's handle what we have in the BLOB
+             * 
+             */          
+            
             if ($is_header && $depth == 0) {
                 $header .= $blob;
             } else {
                 $body .= $blob;
             }
 
+            
+            $body .= $newline;
+            
+            /*
+             * Saving stuff for next iteration
+             */
+
+            $prevdepth = $depth;
+            $prev_header = $is_header;
+            $prev_is_message = $is_message;
             $index++;
+            
         }
 
+        
+        
         if ($index > 2 && $boundary && !$finalized) {
             $body .= $newline . "--" . $boundary . "--" . $newline;
         }
 
+        
+        
+        
+//        console("3333333->". $body);
+        
         $response = new stdClass();
         $response->header = $header;
         $response->body = $body;
 
+        
+        
+        //console($response->body);
+        
+        
+        
         return $response;
     }
 
+    
+    
+    
+    
+
     private function get_structure($structure) {
 
+        //console($structure);
+        //arrivasolo uno
+        
+        
         // merge headers to simplify searching by token
         $imploded_headers = '';
         foreach ($structure->headers as $header_name => $header_value) {
@@ -3759,6 +3827,7 @@ class rcube_dbmail extends rcube_storage {
         $rcube_message_part->d_parameters = (is_array($structure->d_parameters) ? $structure->d_parameters : array());
         $rcube_message_part->ctype_parameters = (is_array($structure->ctype_parameters) ? $structure->ctype_parameters : array());
 
+        
         if (property_exists($structure, 'parts')) {
             foreach ($structure->parts as $part) {
                 $rcube_message_part->parts[] = $this->get_structure($part);
@@ -3793,6 +3862,7 @@ class rcube_dbmail extends rcube_storage {
                 }
             }
         }
+
 
         return $response;
     }
