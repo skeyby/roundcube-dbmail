@@ -562,16 +562,16 @@ class rcube_dbmail extends rcube_storage {
                 . " FROM dbmail_messages "
                 . " INNER JOIN dbmail_physmessage ON dbmail_messages.physmessage_id = dbmail_physmessage.id AND dbmail_messages.mailbox_idnr = {$this->dbmail->escape($mailbox_idnr)} ";
 
-        //giuseppe
+        
+        // flag unseen         
         if ($mode == 'UNSEEN') {
              $query .= " and seen_flag=0 ";
         }
            
+           
         $query .= " {$additional_joins} ";
         $query .= " {$where_conditions} ";
 
-        //giuseppe
-        //console($query);
         
         $res = $this->dbmail->query($query);
         $row = $this->dbmail->fetch_assoc($res);
@@ -584,9 +584,6 @@ class rcube_dbmail extends rcube_storage {
             $this->set_folder_stats($folder, 'maxuid', ($items_count ? $this->get_latest_message_idnr($folder) : 0));
         }
 
-        //giuseppe
-        //console("items_count: " . $items_count . "mode::: " . $mode);
-        
         return $items_count;
     }
 
@@ -1053,7 +1050,6 @@ class rcube_dbmail extends rcube_storage {
         if (!strlen($folder)) {
             $folder = $this->folder;
         }
-
         // format supplied message UIDs list
         $message_uids = $this->list_message_UIDs($uids, $folder);
         if (!$message_uids) {
@@ -1112,6 +1108,14 @@ class rcube_dbmail extends rcube_storage {
             }
         }
 
+        //increment seq
+        $mailbox_idnr = $this->get_mail_box_id($folder);
+            if (!$mailbox_idnr) {
+                // not found
+                return FALSE;
+            }
+        $this->increment_mailbox_seq($this->dbmail->escape($mailbox_idnr));
+
         // return status
         return ($this->dbmail->endTransaction() ? TRUE : FALSE);
     }
@@ -1127,6 +1131,7 @@ class rcube_dbmail extends rcube_storage {
      * @see set_flag
      */
     public function unset_flag($uids, $flag, $folder = null) {
+
         return $this->set_flag($uids, 'UN' . $flag, $folder);
     }
 
@@ -1566,7 +1571,6 @@ class rcube_dbmail extends rcube_storage {
             }
             return FALSE;
         }
-
 
         if (!$skip_transaction && !$this->dbmail->endTransaction()) {
             return FALSE;
@@ -2297,6 +2301,7 @@ class rcube_dbmail extends rcube_storage {
 
         // @TODO: optional checking for messages flags changes (?)
         // @TODO: UIDVALIDITY checking
+        //console("result-- ". $result);
 
         return $result;
     }
@@ -2799,6 +2804,7 @@ class rcube_dbmail extends rcube_storage {
                 . " FROM dbmail_mailboxes "
                 . " WHERE mailbox_idnr = '{$this->dbmail->escape($mailbox_idnr)}' ";
 
+
         $res = $this->dbmail->query($query);
         if ($this->dbmail->num_rows($res) == 0) {
             // not found
@@ -2998,7 +3004,6 @@ class rcube_dbmail extends rcube_storage {
 
         $res = $this->dbmail->query($query);
         $row = $this->dbmail->fetch_assoc($res);
-
         return (is_array($row) && array_key_exists('id', $row) ? $row['id'] : FALSE);
     }
 
@@ -3584,6 +3589,7 @@ class rcube_dbmail extends rcube_storage {
             $rcmh->ctype = $this->get_header_value($imploded_headers, 'content-type');
             $rcmh->folder = $folder;
             $rcmh->subject = $this->get_header_value($imploded_headers, 'subject');
+            //console("---->" . $this->get_header_value($imploded_headers, 'from'));
             $rcmh->from = $this->get_header_value($imploded_headers, 'from');
             $rcmh->to = $this->get_header_value($imploded_headers, 'to');
             $rcmh->replyto = $this->get_header_value($imploded_headers, 'return-path');
@@ -3659,8 +3665,6 @@ class rcube_dbmail extends rcube_storage {
             $mimeParts[] = $row;
         }
 
-        
-      
         $depth = 0;
         $prevdepth = 0;
         $finalized = false;
@@ -3683,16 +3687,13 @@ class rcube_dbmail extends rcube_storage {
             $is_header = $mimePart['is_header'];
             $blob = $mimePart['data'];
 
-//            console("Depth ".$depth." [".$prevdepth."] - Header ".$is_header." [".$prev_header."]");
+            //console("Depth ".$depth." [".$prevdepth."] - Header ".$is_header." [".$prev_header."]");
                         
             if ($is_header) {
                 $prev_boundary = $got_boundary;
-//                $prev_is_message = $is_message;
 
                 $is_message = preg_match('~content-type:\s+message/rfc822\b~i', $blob);
                 
-                
-//                console("111111->". $blob);
             }
 
             $got_boundary = false;
@@ -3703,7 +3704,6 @@ class rcube_dbmail extends rcube_storage {
                 $got_boundary = true;
                 $blist[$depth] = $boundary;
             }
-
 
             /*
              * Code to handle the end of a mime part
@@ -3735,9 +3735,6 @@ class rcube_dbmail extends rcube_storage {
                     $body .= $newline;
                 }
                 $body .= "--" . $boundary . $newline;
-
-
-                //console("È finito il body!");
 
             }
 
@@ -3775,20 +3772,10 @@ class rcube_dbmail extends rcube_storage {
         }
 
         
-        
-        
-//        console("3333333->". $body);
-        
         $response = new stdClass();
         $response->header = $header;
         $response->body = $body;
 
-        
-        
-        //console($response->body);
-        
-        
-        
         return $response;
     }
 
@@ -3799,10 +3786,6 @@ class rcube_dbmail extends rcube_storage {
 
     private function get_structure($structure) {
 
-        //console($structure);
-        //arrivasolo uno
-        
-        
         // merge headers to simplify searching by token
         $imploded_headers = '';
         foreach ($structure->headers as $header_name => $header_value) {
