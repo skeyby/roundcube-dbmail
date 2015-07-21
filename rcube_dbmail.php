@@ -2043,7 +2043,6 @@ class rcube_dbmail extends rcube_storage {
 
         // has children?
         if (count($sub_folders) > 0) {
-
             // delete children
             foreach ($sub_folders as $sub_folder_idnr => $sub_folder_name) {
 
@@ -2066,9 +2065,22 @@ class rcube_dbmail extends rcube_storage {
             }
         }
 
+       
+
+        /* serve perchè altrimenti non cancella una cartella vuota */
+        $mailbox_idnr = $this->get_mail_box_id($folder);
+        $query = "SELECT message_idnr "
+                . " FROM dbmail_messages "
+                . " WHERE mailbox_idnr = '{$this->dbmail->escape($mailbox_idnr)}'";
+        console($query);
+        $res = $this->dbmail->query($query);
+        /* fine */
+
+        
+        
         // delete folder messages
-        if (!$this->delete_message('*', $folder, TRUE)) {
-            // error while deleting folder messages
+        if (!$this->delete_message('*', $folder, TRUE) && $this->dbmail->num_rows($res) > 0) {
+            //error while deleting folder messages
             $this->dbmail->rollbackTransaction();
             return FALSE;
         }
