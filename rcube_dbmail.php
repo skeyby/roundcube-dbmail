@@ -1703,9 +1703,9 @@ class rcube_dbmail extends rcube_storage {
      *
      * @return  array   List of folders
      */
-    public function list_folders_subscribed($root = '', $name = '*', $filter = null, $rights = null, $skip_sort = false) {
+    public function list_folders_subscribed($root = '', $name = '*', $filter = null, $rights = null, $skip_sort = false, $subscribed = true) {
 
-        return $this->list_folders($root, $name, $filter, $rights, $skip_sort);
+        return $this->list_folders($root, $name, $filter, $rights, $skip_sortm, $subscribed);
     }
 
     /**
@@ -1719,7 +1719,7 @@ class rcube_dbmail extends rcube_storage {
      *
      * @return array Indexed array with folder names
      */
-    public function list_folders($root = '', $name = '*', $filter = null, $rights = null, $skip_sort = false) {
+    public function list_folders($root = '', $name = '*', $filter = null, $rights = null, $skip_sort = false, $subscribed = false) {
 
         $folders = array();
 
@@ -1732,10 +1732,21 @@ class rcube_dbmail extends rcube_storage {
             $folders[] = $special_folder;
         }
 
+
+
+//          $query = "SELECT name ";
+//                . " FROM dbmail_mailboxes "
+//                . " WHERE owner_idnr = {$this->dbmail->escape($this->user_idnr)} "
+//                . " AND deleted_flag = 0 ";
+        
+       
         // get 'user' forlders
-        $query = "SELECT name "
-                . " FROM dbmail_mailboxes "
-                . " WHERE owner_idnr = {$this->dbmail->escape($this->user_idnr)} "
+        $query = "SELECT name FROM dbmail_mailboxes ";
+        
+        if ($subscribed)
+            $query .= "inner join dbmail_subscription ON mailbox_idnr=mailbox_id ";
+
+        $query .= " WHERE owner_idnr = {$this->dbmail->escape($this->user_idnr)} "
                 . " AND deleted_flag = 0 ";
 
         if (!$skip_sort) {
@@ -2017,6 +2028,19 @@ class rcube_dbmail extends rcube_storage {
         return ($this->dbmail->endTransaction() ? TRUE : FALSE);
     }
 
+    public function count_message_folder($folder) {
+        /* serve perchè altrimenti non cancella una cartella vuota */
+        $mailbox_idnr = $this->get_mail_box_id($folder);
+        $query = "SELECT message_idnr "
+                . " FROM dbmail_messages "
+                . " WHERE mailbox_idnr = '{$this->dbmail->escape($mailbox_idnr)}'";
+
+        $res = $this->dbmail->query($query);
+
+        /* fine */
+        return $this->dbmail->num_rows($res);
+    }
+
     /**
      * Remove a folder from the server.
      *
@@ -2045,7 +2069,6 @@ class rcube_dbmail extends rcube_storage {
         if (count($sub_folders) > 0) {
             // delete children
             foreach ($sub_folders as $sub_folder_idnr => $sub_folder_name) {
-
                 // delete sub folder messages
                 if (!$this->delete_message('*', $sub_folder_name, TRUE)) {
                     // error while deleting subfolder messages
@@ -2066,18 +2089,6 @@ class rcube_dbmail extends rcube_storage {
         }
 
        
-
-        /* serve perchè altrimenti non cancella una cartella vuota */
-        $mailbox_idnr = $this->get_mail_box_id($folder);
-        $query = "SELECT message_idnr "
-                . " FROM dbmail_messages "
-                . " WHERE mailbox_idnr = '{$this->dbmail->escape($mailbox_idnr)}'";
-        console($query);
-        $res = $this->dbmail->query($query);
-        /* fine */
-
-        
-        
         // delete folder messages
         if (!$this->delete_message('*', $folder, TRUE) && $this->dbmail->num_rows($res) > 0) {
             //error while deleting folder messages
@@ -2815,7 +2826,6 @@ class rcube_dbmail extends rcube_storage {
         $query = " SELECT * "
                 . " FROM dbmail_mailboxes "
                 . " WHERE mailbox_idnr = '{$this->dbmail->escape($mailbox_idnr)}' ";
-
 
         $res = $this->dbmail->query($query);
         if ($this->dbmail->num_rows($res) == 0) {
@@ -3747,7 +3757,6 @@ class rcube_dbmail extends rcube_storage {
                     $body .= $newline;
                 }
                 $body .= "--" . $boundary . $newline;
-
             }
 
             
@@ -3774,7 +3783,6 @@ class rcube_dbmail extends rcube_storage {
             $prev_header = $is_header;
             $prev_is_message = $is_message;
             $index++;
-            
         }
 
         
@@ -3790,11 +3798,6 @@ class rcube_dbmail extends rcube_storage {
 
         return $response;
     }
-
-    
-    
-    
-    
 
     private function get_structure($structure) {
 
