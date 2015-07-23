@@ -1723,23 +1723,6 @@ class rcube_dbmail extends rcube_storage {
 
         $folders = array();
 
-        // 'INBOX' should always be available
-        $folders[] = 'INBOX';
-
-        // get 'special' folders
-        $special_folders = $this->get_special_folders();
-        foreach ($special_folders as $special_folder) {
-            $folders[] = $special_folder;
-        }
-
-
-
-//          $query = "SELECT name ";
-//                . " FROM dbmail_mailboxes "
-//                . " WHERE owner_idnr = {$this->dbmail->escape($this->user_idnr)} "
-//                . " AND deleted_flag = 0 ";
-        
-       
         // get 'user' forlders
         $query = "SELECT name FROM dbmail_mailboxes ";
         
@@ -1755,10 +1738,19 @@ class rcube_dbmail extends rcube_storage {
 
         $res = $this->dbmail->query($query);
 
+        $folders = array();
+        $additionalFolders = array();
         while ($row = $this->dbmail->fetch_assoc($res)) {
-            if (!in_array($row['name'], $folders)) {
+
+            if (strtoupper(substr($row['name'], 0, 5)) == 'INBOX') {
                 $folders[] = $row['name'];
+            } else {
+                $additionalFolders[] = $row['name'];
             }
+        }
+
+        foreach($additionalFolders as $additionalFolder) {
+            $folders[] = $additionalFolder;
         }
 
         return $folders;
@@ -2090,7 +2082,7 @@ class rcube_dbmail extends rcube_storage {
 
        
         // delete folder messages
-        if (!$this->delete_message('*', $folder, TRUE) && $this->dbmail->num_rows($res) > 0) {
+        if (!$this->delete_message('*', $folder, TRUE) && $this->count_message_folder($folder) > 0) {
             //error while deleting folder messages
             $this->dbmail->rollbackTransaction();
             return FALSE;
@@ -2406,7 +2398,7 @@ class rcube_dbmail extends rcube_storage {
      */
     public function get_special_folders($forced = false) {
         // getting config might be expensive, store special folders in memory
-        if (!isset($this->icache['special-folders'])) {
+        /*  if (!isset($this->icache['special-folders'])) {
             $rcube = rcube::get_instance();
             $this->icache['special-folders'] = array();
 
@@ -2417,7 +2409,8 @@ class rcube_dbmail extends rcube_storage {
             }
         }
 
-        return $this->icache['special-folders'];
+          return $this->icache['special-folders']; */
+        return array();
     }
 
     /**
@@ -2425,7 +2418,8 @@ class rcube_dbmail extends rcube_storage {
      */
     public function set_special_folders($specials) {
         // should be overriden by storage class if backend supports special folders (SPECIAL-USE)
-        unset($this->icache['special-folders']);
+        // unset($this->icache['special-folders']);
+        
     }
 
     /**
@@ -3715,7 +3709,6 @@ class rcube_dbmail extends rcube_storage {
                 $prev_boundary = $got_boundary;
 
                 $is_message = preg_match('~content-type:\s+message/rfc822\b~i', $blob);
-                
             }
 
             $got_boundary = false;
