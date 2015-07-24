@@ -39,6 +39,7 @@ class rcube_dbmail extends rcube_storage {
         'x-priority',
         'subject',
         'from',
+        'date',
         'to',
         'cc',
         'bcc'
@@ -2062,7 +2063,7 @@ class rcube_dbmail extends rcube_storage {
             // delete children
             foreach ($sub_folders as $sub_folder_idnr => $sub_folder_name) {
                 // delete sub folder messages
-                if (!$this->delete_message('*', $sub_folder_name, TRUE)) {
+                if (!$this->delete_message('*', $sub_folder_name, TRUE) && $this->count_message_folder($folder) > 0) {
                     // error while deleting subfolder messages
                     $this->dbmail->rollbackTransaction();
                     return FALSE;
@@ -4224,6 +4225,16 @@ class rcube_dbmail extends rcube_storage {
             $date = DateTime::createFromFormat('Y-m-d H:i:s', $header_value);
             $escaped_date_field = ($date ? "'{$this->dbmail->escape($date->format('Y-m-d H:i:s'))}'" : "NULL");
 
+            if ($header_name=="date"){
+                $dt = new DateTime($this->dbmail->escape($header_value));
+                
+                $dt->setTimezone(new DateTimeZone('GMT'));
+                $sortfield = $dt->format('Y-m-d H:i:s');
+                $escaped_date_field = "'".$dt->format('Y-m-d 00:00:00') . "'";
+            }else{
+               $sortfield = $this->dbmail->escape($header_value);
+            }
+
             // header value doesn't exists - create it
             $query = "INSERT INTO dbmail_headervalue "
                     . " ( "
@@ -4236,7 +4247,7 @@ class rcube_dbmail extends rcube_storage {
                     . " ( "
                     . "    '{$this->dbmail->escape($this->hash_string($header_value))}', "
                     . "    '{$this->dbmail->escape($header_value)}', "
-                    . "    '{$this->dbmail->escape($header_value)}', "
+                    . "    '{$sortfield}', "
                     . "     {$escaped_date_field} "
                     . " )";
 
