@@ -231,6 +231,35 @@ class rcube_dbmail extends rcube_storage {
     }
 
     /**
+     * Delete all the expunged messages in all the mailboxes
+     * @return boolean
+     */
+    public function expungeAll($mailbox_idnr) {
+
+            // set message flag
+            $query = " 
+                
+            UPDATE dbmail_messages, dbmail_mailboxes 
+               SET dbmail_messages.status = 2,
+                   dbmail_mailboxes.seq = dbmail_mailboxes.seq + 1
+             WHERE dbmail_messages.deleted_flag = 1
+               AND dbmail_mailboxes.mailbox_idnr = {$mailbox_idnr}
+               AND dbmail_messages.status = 0
+               AND dbmail_messages.mailbox_idnr = dbmail_mailboxes.mailbox_idnr
+               AND dbmail_mailboxes.owner_idnr = {$this->dbmail->escape($this->user_idnr)}
+               
+            ";
+
+            if (!$this->dbmail->query($query)) {
+                return FALSE;
+            }
+
+
+        }
+
+        
+        
+    /**
      * Checks connection state.
      *
      * @return boolean  TRUE on success, FALSE on failure
@@ -1525,29 +1554,8 @@ class rcube_dbmail extends rcube_storage {
 
         foreach ($message_uids as $message_uid) {
 
-            // retrive message record
-            $message_metadata = $this->get_message_record($message_uid);
-            if (!$message_metadata) {
-                // not found
-                if (!$skip_transaction) {
-                    $this->dbmail->rollbackTransaction();
-                }
-                return FALSE;
-            }
-
-            // retrive physmessage record
-            $physmessage_id = $message_metadata['physmessage_id'];
-            $physmessage_metadata = $this->get_physmessage_record($physmessage_id);
-            if (!$physmessage_metadata) {
-                // not found
-                if (!$skip_transaction) {
-                    $this->dbmail->rollbackTransaction();
-                }
-                return FALSE;
-            }
-
-            $query = "DELETE FROM dbmail_messages "
-                    . " WHERE  message_idnr = {$this->dbmail->escape($message_uid)}";
+            $query = "UPDATE dbmail_messages "
+                    . " SET deleted_flag=1 WHERE message_idnr = {$this->dbmail->escape($message_uid)}";
 
             if (!$this->dbmail->query($query)) {
                 // rollbalk transaction
@@ -1557,29 +1565,17 @@ class rcube_dbmail extends rcube_storage {
                 return FALSE;
             }
 
-            // decrement user quota
-            if (!$this->decrement_user_quota($this->user_idnr, $physmessage_metadata['messagesize'])) {
-                if (!$skip_transaction) {
-                    $this->dbmail->rollbackTransaction();
                 }
-                return FALSE;
-            }
-        }
-
-        if (!$this->increment_mailbox_seq($mailbox_idnr)) {
-            if (!$skip_transaction) {
-                $this->dbmail->rollbackTransaction();
-            }
-            return FALSE;
-        }
 
         if (!$skip_transaction && !$this->dbmail->endTransaction()) {
             return FALSE;
-        } else {
-            return TRUE;
         }
-    }
 
+        return $this->expunge_message($uids, $folder, false);
+       
+        }
+
+    
     /**
      * Expunge message(s) and clear the cache.
      *
@@ -1591,6 +1587,8 @@ class rcube_dbmail extends rcube_storage {
      */
     public function expunge_message($uids, $folder = null, $clear_cache = true) {
 
+        list($uids, $all_mode) = $this->parse_uids($uids);
+        
         if (!strlen($folder)) {
             $folder = $this->folder;
         }
@@ -1601,6 +1599,19 @@ class rcube_dbmail extends rcube_storage {
             return FALSE;
         }
 
+        
+        /** Expunge ALL the deleted mails in a folder **/ 
+        
+        if (empty($uids) || $all_mode) {
+            $result = $this->expungeAll($mailbox_idnr); // da rinominare
+            if ($result == FALSE)
+                return FALSE;
+            else
+                return TRUE;
+        } else {        
+        
+            /** Expunge SOME mails from a folder **/
+            
         // format supplied message UIDs list - THIRD PARAMETER enable deleted_flag check
         $message_uids = $this->list_message_UIDs($uids, $folder, TRUE);
         if (!$message_uids) {
@@ -1631,8 +1642,8 @@ class rcube_dbmail extends rcube_storage {
                 return FALSE;
             }
 
-            $query = "DELETE FROM dbmail_messages "
-                    . " WHERE  message_idnr = {$this->dbmail->escape($message_uid)}";
+                $query = "UPDATE dbmail_messages "
+                        . " SET status = 2 WHERE  message_idnr = {$this->dbmail->escape($message_uid)} and deleted_flag = 1";
 
             if (!$this->dbmail->query($query)) {
                 // rollbalk transaction
@@ -1654,6 +1665,8 @@ class rcube_dbmail extends rcube_storage {
         }
 
         return ($this->dbmail->endTransaction() ? TRUE : FALSE);
+
+    }
     }
 
     /**
@@ -1663,31 +1676,31 @@ class rcube_dbmail extends rcube_storage {
      *
      * @return array Two elements array with UIDs converted to list and ALL flag
      */
-    protected function parse_uids($uids) {
-
-        if ($uids === '*' || $uids === '1:*') {
-            if (empty($this->search_set)) {
-                $uids = '1:*';
-                $all = true;
-            }
-            // get UIDs from current search set
-            else {
-                $uids = join(',', $this->search_set->get());
-            }
-        } else {
-            if (is_array($uids)) {
-                $uids = join(',', $uids);
-            } else if (strpos($uids, ':')) {
-                $uids = join(',', rcube_imap_generic::uncompressMessageSet($uids));
-            }
-
-            if (preg_match('/[^0-9,]/', $uids)) {
-                $uids = '';
-            }
-        }
-
-        return array($uids, (bool) $all);
-    }
+//    protected function parse_uids($uids) {
+//
+//        if ($uids === '*' || $uids === '1:*') {
+//            if (empty($this->search_set)) {
+//                $uids = '1:*';
+//                $all = true;
+//            }
+//            // get UIDs from current search set
+//            else {
+//                $uids = join(',', $this->search_set->get());
+//            }
+//        } else {
+//            if (is_array($uids)) {
+//                $uids = join(',', $uids);
+//            } else if (strpos($uids, ':')) {
+//                $uids = join(',', rcube_imap_generic::uncompressMessageSet($uids));
+//            }
+//
+//            if (preg_match('/[^0-9,]/', $uids)) {
+//                $uids = '';
+//            }
+//        }
+//
+//        return array($uids, (bool) $all);
+//    }
 
     /* --------------------------------
      *        folder managment
@@ -1722,6 +1735,7 @@ class rcube_dbmail extends rcube_storage {
      */
     public function list_folders($root = '', $name = '*', $filter = null, $rights = null, $skip_sort = false, $subscribed = false) {
 
+        
         $folders = array();
 
         // get 'user' forlders
@@ -1756,6 +1770,7 @@ class rcube_dbmail extends rcube_storage {
 
         return $folders;
     }
+
 
     /**
      * Subscribe to a specific folder(s)
@@ -3541,6 +3556,16 @@ class rcube_dbmail extends rcube_storage {
             $where_conditions .= " AND ( {$search_conditions->formatted_search_str} )";
         }
 
+        
+        //se cancello da webmail mi setta il flag delete_flag = 1 da dbmail 
+        //invece no di conseguenza 
+        //poi vediamo dove va inserita questa condizione
+        
+        $where_conditions .= " AND dbmail_messages.status = 0 "; 
+        if ($this->options["skip_deleted"])
+            $where_conditions .= " AND dbmail_messages.delete_flag = 0 ";       
+        
+        
         // set additional join tables depending by supplied sort conditions
         switch ($sort_field) {
             case 'subject':
