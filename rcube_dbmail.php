@@ -4463,7 +4463,7 @@ class rcube_dbmail extends rcube_storage {
      *
      * @return 
      */
-     protected function set_messages_caching($set, $mode = null)
+     public function set_messages_caching($set, $mode = null)
      {
 	/** Do Nothing **/
      }
