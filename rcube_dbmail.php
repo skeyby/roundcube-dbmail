@@ -3563,7 +3563,7 @@ class rcube_dbmail extends rcube_storage {
         
         $where_conditions .= " AND dbmail_messages.status = 0 "; 
         if ($this->options["skip_deleted"])
-            $where_conditions .= " AND dbmail_messages.delete_flag = 0 ";       
+            $where_conditions .= " AND dbmail_messages.deleted_flag = 0 ";       
         
         
         // set additional join tables depending by supplied sort conditions
