@@ -3009,6 +3009,10 @@ class rcube_dbmail extends rcube_storage {
      */
     private function get_header_id_by_header_name($header_name) {
 
+	## Roundcube doesn't use some standard RFC names, so we have
+	## to normalize this.
+	if ($header_name == "arrival") $header_name = "received";
+
         $query = "SELECT id "
                 . "FROM dbmail_headername "
                 . "WHERE headername = '{$this->dbmail->escape($header_name)}' "
@@ -3570,6 +3574,9 @@ class rcube_dbmail extends rcube_storage {
         switch ($sort_field) {
             case 'subject':
             case 'from':
+            case 'to':
+            case 'cc':
+	    case 'arrival':
             case 'date':
                 // 'subject' / 'from' and 'date' values are stored into 'dbmail_headervalue' table
                 $header_id = $this->get_header_id_by_header_name($sort_field);
@@ -3585,7 +3592,8 @@ class rcube_dbmail extends rcube_storage {
                 $sort_condition = " ORDER BY dbmail_physmessage.messagesize {$this->dbmail->escape($sort_order)} ";
                 break;
             default:
-                // natural sort - no sort  needed
+                // natural sort 
+		$sort_condition = " ORDER BY dbmail_messages.message_idnr {$this->dbmail->escape($sort_order)} ";
                 break;
         }
 
