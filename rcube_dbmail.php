@@ -578,7 +578,7 @@ class rcube_dbmail extends rcube_storage {
         }
 
         // set where conditions according to supplied search / filter conditions
-        $where_conditions = " WHERE 1 = 1 ";
+        $where_conditions = " WHERE status = 0 ";
         if (is_object($search_conditions) && property_exists($search_conditions, 'formatted_filter_str') && strlen($search_conditions->formatted_filter_str) > 0) {
             $where_conditions .= " AND ( {$search_conditions->formatted_filter_str} )";
         }
