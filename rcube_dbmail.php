@@ -3625,7 +3625,9 @@ class rcube_dbmail extends rcube_storage {
 
         $headers = array();
         $msg_index = $query_offset++;
-        $toSess = array();
+
+	## Removing this to implement a full featured caching method
+        # $toSess = array();
 
         while ($msg = $this->dbmail->fetch_assoc($res)) {
 
@@ -3667,12 +3669,14 @@ class rcube_dbmail extends rcube_storage {
 
             $headers[$msg_index] = $rcmh;
 
-            $toSess[$rcmh->uid] = $physmessage_id . ":" . $msg_index . ":" . $messagesize . ":" . $seen . ":" . $answered . ":" . $deleted . ":" . $flagged;
+		## Removing this to implement a full featured caching method
+		# $toSess[$rcmh->uid] = $physmessage_id . ":" . $msg_index . ":" . $messagesize . ":" . $seen . ":" . $answered . ":" . $deleted . ":" . $flagged;
 
             $msg_index++;
         }
 
-        $_SESSION['dbmail_header'] = $toSess;
+	## Removing this to implement a full featured caching method
+	# $_SESSION['dbmail_header'] = $toSess;
 
         return $headers;
     }
