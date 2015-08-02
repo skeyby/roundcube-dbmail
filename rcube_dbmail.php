@@ -2953,7 +2953,14 @@ class rcube_dbmail extends rcube_storage {
      */
     protected function get_header_value($header, $token) {
 
+	## Remove any trailing WSP
         $header = trim($header);
+
+	## Unfolding according to RFC 2822, chapter 2.2.3
+	$header = str_replace("\r\n ", "", $header);
+	## Unfolding with compatibility with some non-standard mailers
+	## that only add \n instead of \r\n
+	$header = str_replace("\n ", "", $header);
 
         // explode header by new line sign
         $rows = explode("\n", $header);
@@ -3011,6 +3018,10 @@ class rcube_dbmail extends rcube_storage {
 
 	## Roundcube doesn't use some standard RFC names, so we have
 	## to normalize this.
+
+	## Roundcube "arrival" corresponds to "received", but - WARNING -
+        ## received isn't a required header, so the results are pretty strange
+	## maybe assuming arrival == data could be a better solution
 	if ($header_name == "arrival") $header_name = "received";
 
         $query = "SELECT id "
