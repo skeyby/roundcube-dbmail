@@ -244,7 +244,7 @@ class rcube_dbmail extends rcube_storage {
                    dbmail_mailboxes.seq = dbmail_mailboxes.seq + 1
              WHERE dbmail_messages.deleted_flag = 1
                AND dbmail_mailboxes.mailbox_idnr = {$mailbox_idnr}
-               AND dbmail_messages.status = 0
+               AND dbmail_messages.status < 2
                AND dbmail_messages.mailbox_idnr = dbmail_mailboxes.mailbox_idnr
                AND dbmail_mailboxes.owner_idnr = {$this->dbmail->escape($this->user_idnr)}
                
@@ -578,7 +578,7 @@ class rcube_dbmail extends rcube_storage {
         }
 
         // set where conditions according to supplied search / filter conditions
-        $where_conditions = " WHERE status = 0 ";
+        $where_conditions = " WHERE status < 2 ";
         if (is_object($search_conditions) && property_exists($search_conditions, 'formatted_filter_str') && strlen($search_conditions->formatted_filter_str) > 0) {
             $where_conditions .= " AND ( {$search_conditions->formatted_filter_str} )";
         }
@@ -3576,7 +3576,7 @@ class rcube_dbmail extends rcube_storage {
         //invece no di conseguenza 
         //poi vediamo dove va inserita questa condizione
         
-        $where_conditions .= " AND dbmail_messages.status = 0 "; 
+        $where_conditions .= " AND dbmail_messages.status < 2 "; 
         if ($this->options["skip_deleted"])
             $where_conditions .= " AND dbmail_messages.deleted_flag = 0 ";       
         
