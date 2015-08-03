@@ -6,19 +6,13 @@ Repository for the DBMAIL Storage plugin for Roundcube
 
 rcube_dmail is a _storage plugin_ for roundcube webmail (http://roundcube.net), intended to directly hook roundcube into dbmail (http://dbmail.org/) database.
 
-the plugin is a pretty rough proof of concept right now, and is not intended (yet) for real usage. it's currently functionalities are:
-* Login
-* Folder listing
-* Messages listing
-* Message retrival
+Current release of the plugin implement all the basic functionalities of RoundCube.
 
-Missing functionalities, currently under development, are:
-* Searching functions
-* Message writing
+Currently everything work but thread-view.
 
 The plugin is currently only tested with **MySQL**, but plans include support for postgre and other.
 
-any help is greatly welcome :-)
+Any help is greatly welcome :-)
 
 ---
 ## Installation
@@ -38,6 +32,12 @@ $config['dbmail_fixed_headername_cache'] = FALSE; # add new headernames (if not
 Use the official PEAR Mail_mimeDecode library, changing following line in 'composer.json'
 - change:  "pear/mail_mime-decode": ">=1.5.5",
 - to:      "pear-pear.php.net/Mail_mimeDecode": ">=1.5.5",
+
+then run 
+
+```
+php -f composer.phar --no-dev
+```
 
 ---
 ## Sponsorship
