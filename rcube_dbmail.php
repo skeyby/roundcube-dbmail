@@ -1332,28 +1332,11 @@ class rcube_dbmail extends rcube_storage {
             return FALSE;
         }
 
-
-
-        // increment folder 'seq' flag
-        if (!$this->increment_mailbox_seq($mailbox_idnr)) {
+        // increment folder and message 'seq' flag
+        if (!$this->increment_mailbox_seq($mailbox_idnr, $message_idnr)) {
             $this->dbmail->rollbackTransaction();
             return FALSE;
         }
-
-
-
-        /** MANCANO TUTTI LE CACHE DEGLI HEADER.... * */
-        // funzione _header_cache in dm_message.c (FATTO)
-
-        /** MANCA L'ENVELOPE CACHE * */
-        // funzione imap_get_envelope in dm_misc.c
-        // è un po' mostruosa ma alla fine facile
-        // (VEDI tabella dbmail_envelope)) (FATTO)
-
-        /** PENSO MANCHI IL REFERENCE FIELD * */
-        // funzione dbmail_message_cache_referencesfield in dm_message.c
-        // Generato a partire dall'header "References" oppure "In-Reply-To"
-        // increment folder 'seq' flag (FATTO)
 
         return ($this->dbmail->endTransaction() ? $message_idnr : FALSE);
     }
@@ -1506,6 +1489,8 @@ class rcube_dbmail extends rcube_storage {
                 return FALSE;
             }
 
+            $message_idnr = $this->dbmail->insert_id('dbmail_messages');
+
             // increment user quota
             if (!$this->increment_user_quota($this->user_idnr, $physmessage_metadata['messagesize'])) {
                 $this->dbmail->rollbackTransaction();
@@ -1513,7 +1498,7 @@ class rcube_dbmail extends rcube_storage {
             }
         }
 
-        if (!$this->increment_mailbox_seq($to_mailbox_idnr)) {
+        if (!$this->increment_mailbox_seq($to_mailbox_idnr, $message_idnr)) {
             $this->dbmail->rollbackTransaction();
             return FALSE;
         }
@@ -1613,7 +1598,7 @@ class rcube_dbmail extends rcube_storage {
                 return TRUE;
         } else {        
         
-            /** Expunge SOME mails from a folder **/
+        /** Expunge SOME mails from a folder **/    
             
         // format supplied message UIDs list - THIRD PARAMETER enable deleted_flag check
         $message_uids = $this->list_message_UIDs($uids, $folder, TRUE);
@@ -1672,38 +1657,6 @@ class rcube_dbmail extends rcube_storage {
     }
     }
 
-    /**
-     * Parse message UIDs input
-     *
-     * @param mixed $uids UIDs array or comma-separated list or '*' or '1:*'
-     *
-     * @return array Two elements array with UIDs converted to list and ALL flag
-     */
-//    protected function parse_uids($uids) {
-//
-//        if ($uids === '*' || $uids === '1:*') {
-//            if (empty($this->search_set)) {
-//                $uids = '1:*';
-//                $all = true;
-//            }
-//            // get UIDs from current search set
-//            else {
-//                $uids = join(',', $this->search_set->get());
-//            }
-//        } else {
-//            if (is_array($uids)) {
-//                $uids = join(',', $uids);
-//            } else if (strpos($uids, ':')) {
-//                $uids = join(',', rcube_imap_generic::uncompressMessageSet($uids));
-//            }
-//
-//            if (preg_match('/[^0-9,]/', $uids)) {
-//                $uids = '';
-//            }
-//        }
-//
-//        return array($uids, (bool) $all);
-//    }
 
     /* --------------------------------
      *        folder managment
@@ -1733,6 +1686,7 @@ class rcube_dbmail extends rcube_storage {
      * @param mixed   $filter    Optional filter
      * @param string  $rights    Optional ACL requirements
      * @param bool    $skip_sort Enable to return unsorted list (for better performance)
+     * @param boolean $subscribed Return only subscribed folders
      *
      * @return array Indexed array with folder names
      */
@@ -2955,14 +2909,14 @@ class rcube_dbmail extends rcube_storage {
      */
     protected function get_header_value($header, $token) {
 
-	## Remove any trailing WSP
+    	## Remove any trailing WSP
         $header = trim($header);
 
-	## Unfolding according to RFC 2822, chapter 2.2.3
-	$header = str_replace("\r\n ", "", $header);
-	## Unfolding with compatibility with some non-standard mailers
-	## that only add \n instead of \r\n
-	$header = str_replace("\n ", "", $header);
+    	## Unfolding according to RFC 2822, chapter 2.2.3
+    	$header = str_replace("\r\n ", "", $header);
+    	## Unfolding with compatibility with some non-standard mailers
+    	## that only add \n instead of \r\n
+    	$header = str_replace("\n ", "", $header);
 
         // explode header by new line sign
         $rows = explode("\n", $header);
