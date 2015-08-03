@@ -244,7 +244,7 @@ class rcube_dbmail extends rcube_storage {
                    dbmail_mailboxes.seq = dbmail_mailboxes.seq + 1
              WHERE dbmail_messages.deleted_flag = 1
                AND dbmail_mailboxes.mailbox_idnr = {$mailbox_idnr}
-               AND dbmail_messages.status < ".MESSAGE_STATUS_DELETE."
+               AND dbmail_messages.status < ".self::MESSAGE_STATUS_DELETE."
                AND dbmail_messages.mailbox_idnr = dbmail_mailboxes.mailbox_idnr
                AND dbmail_mailboxes.owner_idnr = {$this->dbmail->escape($this->user_idnr)}
                
@@ -578,7 +578,7 @@ class rcube_dbmail extends rcube_storage {
         }
 
         // set where conditions according to supplied search / filter conditions
-        $where_conditions = " WHERE status < ".MESSAGE_STATUS_DELETE;
+        $where_conditions = " WHERE dbmail_messages.status < ".self::MESSAGE_STATUS_DELETE;
         if (is_object($search_conditions) && property_exists($search_conditions, 'formatted_filter_str') && strlen($search_conditions->formatted_filter_str) > 0) {
             $where_conditions .= " AND ( {$search_conditions->formatted_filter_str} )";
         }
@@ -647,7 +647,7 @@ class rcube_dbmail extends rcube_storage {
         }
 
         // set where conditions according to supplied search / filter conditions
-        $where_conditions = " WHERE status < ".MESSAGE_STATUS_DELETE;
+        $where_conditions = " WHERE dbmail_messages.status < ".self::MESSAGE_STATUS_DELETE;
         if (is_object($search_conditions) && property_exists($search_conditions, 'formatted_filter_str') && strlen($search_conditions->formatted_filter_str) > 0) {
             $where_conditions .= " AND ( {$search_conditions->formatted_filter_str} )";
         }
@@ -3562,7 +3562,7 @@ class rcube_dbmail extends rcube_storage {
         }
 
         ## "Base Condition" is that the message should not be EXPUNGED (thus DELETED)
-        $where_conditions = " WHERE dbmail_messages.status < ".MESSAGE_STATUS_DELETE; 
+        $where_conditions = " WHERE dbmail_messages.status < ".self::MESSAGE_STATUS_DELETE; 
 
         // set where conditions according to supplied search / filter conditions
         if (is_object($search_conditions) && property_exists($search_conditions, 'formatted_filter_str') && strlen($search_conditions->formatted_filter_str) > 0) {
@@ -3676,7 +3676,7 @@ class rcube_dbmail extends rcube_storage {
     	# $_SESSION['dbmail_header'] = $toSess;
 
         return $headers;
-        
+
     }
 
     /**
