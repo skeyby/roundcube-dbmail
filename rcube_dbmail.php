@@ -602,16 +602,17 @@ class rcube_dbmail extends rcube_storage {
         $query .= " {$additional_joins} ";
         $query .= " {$where_conditions} ";
 
-        
         $res = $this->dbmail->query($query);
         $row = $this->dbmail->fetch_assoc($res);
 
         $items_count = ($row['items_count'] > 0 ? $row['items_count'] : 0);
 
         // cache messages count and latest message id
-        if ($status) {
-            $this->set_folder_stats($folder, 'cnt', $items_count);
-            $this->set_folder_stats($folder, 'maxuid', ($items_count ? $this->get_latest_message_idnr($folder) : 0));
+        if ($mode == 'ALL') {
+            if ($status) {
+                $this->set_folder_stats($folder, 'cnt', $items_count);
+                $this->set_folder_stats($folder, 'maxuid', ($items_count ? $this->get_latest_message_idnr($folder) : 0));
+            }
         }
 
         return $items_count;
@@ -1399,14 +1400,15 @@ class rcube_dbmail extends rcube_storage {
                     . " SET mailbox_idnr = {$this->dbmail->escape($to_mailbox_idnr)} "
                     . " WHERE message_idnr = {$this->dbmail->escape($message_uid)}";
 
-            if (!$this->dbmail->query($query) || !$this->increment_message_seq($message_uid)) {
+            if (!$this->dbmail->query($query)) {
                 $this->dbmail->rollbackTransaction();
                 return FALSE;
             }
-        }
 
-        $this->increment_mailbox_seq($from_mailbox_idnr);
-        $this->increment_mailbox_seq($to_mailbox_idnr);
+            $this->increment_mailbox_seq($from_mailbox_idnr);
+            $this->increment_mailbox_seq($to_mailbox_idnr, $message_uid);
+
+        }
 
         // return status
         return ($this->dbmail->endTransaction() ? TRUE : FALSE);
@@ -1558,14 +1560,15 @@ class rcube_dbmail extends rcube_storage {
                     . " SET deleted_flag=1 WHERE message_idnr = {$this->dbmail->escape($message_uid)}";
 
             if (!$this->dbmail->query($query)) {
-                // rollbalk transaction
                 if (!$skip_transaction) {
                     $this->dbmail->rollbackTransaction();
                 }
                 return FALSE;
             }
 
-                }
+            $this->increment_mailbox_seq($mailbox_idnr, $message_uid);
+
+        }
 
         if (!$skip_transaction && !$this->dbmail->endTransaction()) {
             return FALSE;
@@ -1656,10 +1659,10 @@ class rcube_dbmail extends rcube_storage {
                 $this->dbmail->rollbackTransaction();
                 return FALSE;
             }
+
         }
 
         if (!$this->increment_mailbox_seq($mailbox_idnr)) {
-
             $this->dbmail->rollbackTransaction();
             return FALSE;
         }
@@ -2332,7 +2335,6 @@ class rcube_dbmail extends rcube_storage {
 
         // @TODO: optional checking for messages flags changes (?)
         // @TODO: UIDVALIDITY checking
-        //console("result-- ". $result);
 
         return $result;
     }
@@ -3124,36 +3126,33 @@ class rcube_dbmail extends rcube_storage {
     }
 
     /**
-     * Increment 'seq' flag for supplied mailbox ID
+     * Increment 'seq' flag for supplied mailbox ID and if a message_id is specified
+     * increment it as well
      *
      * @param int  $mailbox_idnr    mailbox ID
-     *
-     * @return boolean True on success, False on failure
-     */
-    private function increment_mailbox_seq($mailbox_idnr) {
-
-        $query = "UPDATE dbmail_mailboxes "
-                . " SET seq = (seq + 1) "
-                . " WHERE mailbox_idnr = {$this->dbmail->escape($mailbox_idnr)}";
-
-        return ($this->dbmail->query($query) ? TRUE : FALSE);
-    }
-
-    /**
-     * Increment 'seq' flag for supplied message ID
-     *
      * @param int  $message_idnr    message ID
      *
      * @return boolean True on success, False on failure
      */
-    private function increment_message_seq($message_idnr) {
+    private function increment_mailbox_seq($mailbox_idnr, $message_idnr = FALSE) {
 
-        $query = "UPDATE dbmail_messages "
-                . " SET seq = (seq + 1) "
-                . " WHERE message_idnr = {$this->dbmail->escape($message_idnr)}";
+        if ($message_idnr == FALSE)
+        {
+            $query = "UPDATE dbmail_mailboxes "
+                    . " SET seq = (seq + 1) "
+                    . " WHERE mailbox_idnr = {$this->dbmail->escape($mailbox_idnr)}";
+        } else {
+
+            $query = "UPDATE  dbmail_mailboxes, dbmail_messages
+                        SET   dbmail_mailboxes.seq = dbmail_mailboxes.seq + 1, dbmail_messages.seq = dbmail_mailboxes.seq
+                        WHERE dbmail_mailboxes.mailbox_idnr = ".$mailbox_idnr."
+                        AND   dbmail_messages.message_idnr = ".$message_idnr;
+
+        }
 
         return ($this->dbmail->query($query) ? TRUE : FALSE);
     }
+
 
     /**
      * Checks if folder is subscribed
@@ -4488,5 +4487,6 @@ class rcube_dbmail extends rcube_storage {
      {
 	/** Do Nothing **/
      }
+
 
 }
