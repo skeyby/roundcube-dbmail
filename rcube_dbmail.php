@@ -244,7 +244,7 @@ class rcube_dbmail extends rcube_storage {
                    dbmail_mailboxes.seq = dbmail_mailboxes.seq + 1
              WHERE dbmail_messages.deleted_flag = 1
                AND dbmail_mailboxes.mailbox_idnr = {$mailbox_idnr}
-               AND dbmail_messages.status < 2
+               AND dbmail_messages.status < ".MESSAGE_STATUS_DELETE."
                AND dbmail_messages.mailbox_idnr = dbmail_mailboxes.mailbox_idnr
                AND dbmail_mailboxes.owner_idnr = {$this->dbmail->escape($this->user_idnr)}
                
@@ -578,7 +578,7 @@ class rcube_dbmail extends rcube_storage {
         }
 
         // set where conditions according to supplied search / filter conditions
-        $where_conditions = " WHERE status < 2 ";
+        $where_conditions = " WHERE status < ".MESSAGE_STATUS_DELETE;
         if (is_object($search_conditions) && property_exists($search_conditions, 'formatted_filter_str') && strlen($search_conditions->formatted_filter_str) > 0) {
             $where_conditions .= " AND ( {$search_conditions->formatted_filter_str} )";
         }
@@ -647,7 +647,7 @@ class rcube_dbmail extends rcube_storage {
         }
 
         // set where conditions according to supplied search / filter conditions
-        $where_conditions = " WHERE 1 = 1 ";
+        $where_conditions = " WHERE status < ".MESSAGE_STATUS_DELETE;
         if (is_object($search_conditions) && property_exists($search_conditions, 'formatted_filter_str') && strlen($search_conditions->formatted_filter_str) > 0) {
             $where_conditions .= " AND ( {$search_conditions->formatted_filter_str} )";
         }
@@ -3561,8 +3561,10 @@ class rcube_dbmail extends rcube_storage {
             $additional_joins .= " {$search_conditions->additional_join_tables}";
         }
 
+        ## "Base Condition" is that the message should not be EXPUNGED (thus DELETED)
+        $where_conditions = " WHERE dbmail_messages.status < ".MESSAGE_STATUS_DELETE; 
+
         // set where conditions according to supplied search / filter conditions
-        $where_conditions = " WHERE 1 = 1 ";
         if (is_object($search_conditions) && property_exists($search_conditions, 'formatted_filter_str') && strlen($search_conditions->formatted_filter_str) > 0) {
             $where_conditions .= " AND ( {$search_conditions->formatted_filter_str} )";
         }
@@ -3571,12 +3573,7 @@ class rcube_dbmail extends rcube_storage {
             $where_conditions .= " AND ( {$search_conditions->formatted_search_str} )";
         }
 
-        
-        //se cancello da webmail mi setta il flag delete_flag = 1 da dbmail 
-        //invece no di conseguenza 
-        //poi vediamo dove va inserita questa condizione
-        
-        $where_conditions .= " AND dbmail_messages.status < 2 "; 
+        ## Do we want deleted messages?
         if ($this->options["skip_deleted"])
             $where_conditions .= " AND dbmail_messages.deleted_flag = 0 ";       
         
@@ -3587,7 +3584,7 @@ class rcube_dbmail extends rcube_storage {
             case 'from':
             case 'to':
             case 'cc':
-	    case 'arrival':
+            case 'arrival':
             case 'date':
                 // 'subject' / 'from' and 'date' values are stored into 'dbmail_headervalue' table
                 $header_id = $this->get_header_id_by_header_name($sort_field);
@@ -3604,7 +3601,7 @@ class rcube_dbmail extends rcube_storage {
                 break;
             default:
                 // natural sort 
-		$sort_condition = " ORDER BY dbmail_messages.message_idnr {$this->dbmail->escape($sort_order)} ";
+                $sort_condition = " ORDER BY dbmail_messages.message_idnr {$this->dbmail->escape($sort_order)} ";
                 break;
         }
 
@@ -3626,7 +3623,7 @@ class rcube_dbmail extends rcube_storage {
         $headers = array();
         $msg_index = $query_offset++;
 
-	## Removing this to implement a full featured caching method
+        ## Removing this to implement a full featured caching method
         # $toSess = array();
 
         while ($msg = $this->dbmail->fetch_assoc($res)) {
@@ -3669,16 +3666,17 @@ class rcube_dbmail extends rcube_storage {
 
             $headers[$msg_index] = $rcmh;
 
-		## Removing this to implement a full featured caching method
-		# $toSess[$rcmh->uid] = $physmessage_id . ":" . $msg_index . ":" . $messagesize . ":" . $seen . ":" . $answered . ":" . $deleted . ":" . $flagged;
+    		## Removing this to implement a full featured caching method
+    		# $toSess[$rcmh->uid] = $physmessage_id . ":" . $msg_index . ":" . $messagesize . ":" . $seen . ":" . $answered . ":" . $deleted . ":" . $flagged;
 
             $msg_index++;
         }
 
-	## Removing this to implement a full featured caching method
-	# $_SESSION['dbmail_header'] = $toSess;
+    	## Removing this to implement a full featured caching method
+    	# $_SESSION['dbmail_header'] = $toSess;
 
         return $headers;
+        
     }
 
     /**
