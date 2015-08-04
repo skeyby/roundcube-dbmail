@@ -90,7 +90,7 @@ class rcube_dbmail extends rcube_storage {
         'SORT=DISPLAY',
         'SPECIAL-USE',
         'STARTTLS',
-        'THREAD',
+        ## 'THREAD', # Temporaly removed since the code doesn't support it
         'UIDPLUS',
         'UNSELECT',
         'URLFETCH=BINARY',
