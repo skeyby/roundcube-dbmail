@@ -236,29 +236,25 @@ class rcube_dbmail extends rcube_storage {
      */
     public function expungeAll($mailbox_idnr) {
 
-            // set message flag
-            $query = " 
+        // set message flag
+        $query = " 
                 
             UPDATE dbmail_messages, dbmail_mailboxes 
                SET dbmail_messages.status = 2,
                    dbmail_mailboxes.seq = dbmail_mailboxes.seq + 1
              WHERE dbmail_messages.deleted_flag = 1
                AND dbmail_mailboxes.mailbox_idnr = {$mailbox_idnr}
-               AND dbmail_messages.status < ".self::MESSAGE_STATUS_DELETE."
+               AND dbmail_messages.status < " . self::MESSAGE_STATUS_DELETE . "
                AND dbmail_messages.mailbox_idnr = dbmail_mailboxes.mailbox_idnr
                AND dbmail_mailboxes.owner_idnr = {$this->dbmail->escape($this->user_idnr)}
                
             ";
 
-            if (!$this->dbmail->query($query)) {
-                return FALSE;
-            }
-
-
+        if (!$this->dbmail->query($query)) {
+            return FALSE;
         }
+    }
 
-        
-        
     /**
      * Checks connection state.
      *
@@ -578,7 +574,7 @@ class rcube_dbmail extends rcube_storage {
         }
 
         // set where conditions according to supplied search / filter conditions
-        $where_conditions = " WHERE dbmail_messages.status < ".self::MESSAGE_STATUS_DELETE;
+        $where_conditions = " WHERE dbmail_messages.status < " . self::MESSAGE_STATUS_DELETE;
         if (is_object($search_conditions) && property_exists($search_conditions, 'formatted_filter_str') && strlen($search_conditions->formatted_filter_str) > 0) {
             $where_conditions .= " AND ( {$search_conditions->formatted_filter_str} )";
         }
@@ -592,13 +588,13 @@ class rcube_dbmail extends rcube_storage {
                 . " FROM dbmail_messages "
                 . " INNER JOIN dbmail_physmessage ON dbmail_messages.physmessage_id = dbmail_physmessage.id AND dbmail_messages.mailbox_idnr = {$this->dbmail->escape($mailbox_idnr)} ";
 
-        
+
         // flag unseen         
         if ($mode == 'UNSEEN') {
-             $query .= " and seen_flag=0 ";
+            $query .= " and seen_flag=0 ";
         }
-           
-           
+
+
         $query .= " {$additional_joins} ";
         $query .= " {$where_conditions} ";
 
@@ -648,7 +644,7 @@ class rcube_dbmail extends rcube_storage {
         }
 
         // set where conditions according to supplied search / filter conditions
-        $where_conditions = " WHERE dbmail_messages.status < ".self::MESSAGE_STATUS_DELETE;
+        $where_conditions = " WHERE dbmail_messages.status < " . self::MESSAGE_STATUS_DELETE;
         if (is_object($search_conditions) && property_exists($search_conditions, 'formatted_filter_str') && strlen($search_conditions->formatted_filter_str) > 0) {
             $where_conditions .= " AND ( {$search_conditions->formatted_filter_str} )";
         }
@@ -951,7 +947,12 @@ class rcube_dbmail extends rcube_storage {
             return FALSE;
         }
 
-        return $this->get_message_part_body($mime_decoded, $part);
+        $body = $this->get_message_part_body($mime_decoded, $part);
+        if ($print) {
+            echo $body;
+        }
+
+        return $body;
     }
 
     /**
@@ -1141,10 +1142,10 @@ class rcube_dbmail extends rcube_storage {
 
         //increment seq
         $mailbox_idnr = $this->get_mail_box_id($folder);
-            if (!$mailbox_idnr) {
-                // not found
-                return FALSE;
-            }
+        if (!$mailbox_idnr) {
+            // not found
+            return FALSE;
+        }
         $this->increment_mailbox_seq($this->dbmail->escape($mailbox_idnr));
 
         // return status
@@ -1390,7 +1391,6 @@ class rcube_dbmail extends rcube_storage {
 
             $this->increment_mailbox_seq($from_mailbox_idnr);
             $this->increment_mailbox_seq($to_mailbox_idnr, $message_uid);
-
         }
 
         // return status
@@ -1552,7 +1552,6 @@ class rcube_dbmail extends rcube_storage {
             }
 
             $this->increment_mailbox_seq($mailbox_idnr, $message_uid);
-
         }
 
         if (!$skip_transaction && !$this->dbmail->endTransaction()) {
@@ -1560,10 +1559,8 @@ class rcube_dbmail extends rcube_storage {
         }
 
         return $this->expunge_message($uids, $folder, false);
-       
-        }
+    }
 
-    
     /**
      * Expunge message(s) and clear the cache.
      *
@@ -1576,7 +1573,7 @@ class rcube_dbmail extends rcube_storage {
     public function expunge_message($uids, $folder = null, $clear_cache = true) {
 
         list($uids, $all_mode) = $this->parse_uids($uids);
-        
+
         if (!strlen($folder)) {
             $folder = $this->folder;
         }
@@ -1587,76 +1584,71 @@ class rcube_dbmail extends rcube_storage {
             return FALSE;
         }
 
-        
-        /** Expunge ALL the deleted mails in a folder **/ 
-        
+
+        /** Expunge ALL the deleted mails in a folder * */
         if (empty($uids) || $all_mode) {
             $result = $this->expungeAll($mailbox_idnr); // da rinominare
             if ($result == FALSE)
                 return FALSE;
             else
                 return TRUE;
-        } else {        
-        
-        /** Expunge SOME mails from a folder **/    
-            
-        // format supplied message UIDs list - THIRD PARAMETER enable deleted_flag check
-        $message_uids = $this->list_message_UIDs($uids, $folder, TRUE);
-        if (!$message_uids) {
-            return FALSE;
-        }
+        } else {
 
-        // start transaction
-        if (!$this->dbmail->startTransaction()) {
-            return FALSE;
-        }
-
-        foreach ($message_uids as $message_uid) {
-
-            // retrive message record
-            $message_metadata = $this->get_message_record($message_uid);
-            if (!$message_metadata) {
-                // not found
-                $this->dbmail->rollbackTransaction();
+            /** Expunge SOME mails from a folder * */
+            // format supplied message UIDs list - THIRD PARAMETER enable deleted_flag check
+            $message_uids = $this->list_message_UIDs($uids, $folder, TRUE);
+            if (!$message_uids) {
                 return FALSE;
             }
 
-            // retrive physmessage record
-            $physmessage_id = $message_metadata['physmessage_id'];
-            $physmessage_metadata = $this->get_physmessage_record($physmessage_id);
-            if (!$physmessage_metadata) {
-                // not found
-                $this->dbmail->rollbackTransaction();
+            // start transaction
+            if (!$this->dbmail->startTransaction()) {
                 return FALSE;
             }
+
+            foreach ($message_uids as $message_uid) {
+
+                // retrive message record
+                $message_metadata = $this->get_message_record($message_uid);
+                if (!$message_metadata) {
+                    // not found
+                    $this->dbmail->rollbackTransaction();
+                    return FALSE;
+                }
+
+                // retrive physmessage record
+                $physmessage_id = $message_metadata['physmessage_id'];
+                $physmessage_metadata = $this->get_physmessage_record($physmessage_id);
+                if (!$physmessage_metadata) {
+                    // not found
+                    $this->dbmail->rollbackTransaction();
+                    return FALSE;
+                }
 
                 $query = "UPDATE dbmail_messages "
                         . " SET status = 2 WHERE  message_idnr = {$this->dbmail->escape($message_uid)} and deleted_flag = 1";
 
-            if (!$this->dbmail->query($query)) {
-                // rollbalk transaction
+                if (!$this->dbmail->query($query)) {
+                    // rollbalk transaction
+                    $this->dbmail->rollbackTransaction();
+                    return FALSE;
+                }
+
+                // decrement user quota
+                if (!$this->decrement_user_quota($this->user_idnr, $physmessage_metadata['messagesize'])) {
+                    $this->dbmail->rollbackTransaction();
+                    return FALSE;
+                }
+            }
+
+            if (!$this->increment_mailbox_seq($mailbox_idnr)) {
                 $this->dbmail->rollbackTransaction();
                 return FALSE;
             }
 
-            // decrement user quota
-            if (!$this->decrement_user_quota($this->user_idnr, $physmessage_metadata['messagesize'])) {
-                $this->dbmail->rollbackTransaction();
-                return FALSE;
-            }
-
+            return ($this->dbmail->endTransaction() ? TRUE : FALSE);
         }
-
-        if (!$this->increment_mailbox_seq($mailbox_idnr)) {
-            $this->dbmail->rollbackTransaction();
-            return FALSE;
-        }
-
-        return ($this->dbmail->endTransaction() ? TRUE : FALSE);
-
     }
-    }
-
 
     /* --------------------------------
      *        folder managment
@@ -1692,12 +1684,12 @@ class rcube_dbmail extends rcube_storage {
      */
     public function list_folders($root = '', $name = '*', $filter = null, $rights = null, $skip_sort = false, $subscribed = false) {
 
-        
+
         $folders = array();
 
         // get 'user' forlders
         $query = "SELECT name FROM dbmail_mailboxes ";
-        
+
         if ($subscribed)
             $query .= "inner join dbmail_subscription ON mailbox_idnr=mailbox_id ";
 
@@ -1721,13 +1713,12 @@ class rcube_dbmail extends rcube_storage {
             }
         }
 
-        foreach($additionalFolders as $additionalFolder) {
+        foreach ($additionalFolders as $additionalFolder) {
             $folders[] = $additionalFolder;
         }
 
         return $folders;
     }
-
 
     /**
      * Subscribe to a specific folder(s)
@@ -2053,7 +2044,7 @@ class rcube_dbmail extends rcube_storage {
             }
         }
 
-       
+
         // delete folder messages
         if (!$this->delete_message('*', $folder, TRUE) && $this->count_message_folder($folder) > 0) {
             //error while deleting folder messages
@@ -2371,15 +2362,15 @@ class rcube_dbmail extends rcube_storage {
     public function get_special_folders($forced = false) {
         // getting config might be expensive, store special folders in memory
         /*  if (!isset($this->icache['special-folders'])) {
-            $rcube = rcube::get_instance();
-            $this->icache['special-folders'] = array();
+          $rcube = rcube::get_instance();
+          $this->icache['special-folders'] = array();
 
-            foreach (self::$folder_types as $type) {
-                if ($folder = $rcube->config->get($type . '_mbox')) {
-                    $this->icache['special-folders'][$type] = $folder;
-                }
-            }
-        }
+          foreach (self::$folder_types as $type) {
+          if ($folder = $rcube->config->get($type . '_mbox')) {
+          $this->icache['special-folders'][$type] = $folder;
+          }
+          }
+          }
 
           return $this->icache['special-folders']; */
         return array();
@@ -2391,7 +2382,6 @@ class rcube_dbmail extends rcube_storage {
     public function set_special_folders($specials) {
         // should be overriden by storage class if backend supports special folders (SPECIAL-USE)
         // unset($this->icache['special-folders']);
-        
     }
 
     /**
@@ -2909,14 +2899,14 @@ class rcube_dbmail extends rcube_storage {
      */
     protected function get_header_value($header, $token) {
 
-    	## Remove any trailing WSP
+        ## Remove any trailing WSP
         $header = trim($header);
 
-    	## Unfolding according to RFC 2822, chapter 2.2.3
-    	$header = str_replace("\r\n ", "", $header);
-    	## Unfolding with compatibility with some non-standard mailers
-    	## that only add \n instead of \r\n
-    	$header = str_replace("\n ", "", $header);
+        ## Unfolding according to RFC 2822, chapter 2.2.3
+        $header = str_replace("\r\n ", "", $header);
+        ## Unfolding with compatibility with some non-standard mailers
+        ## that only add \n instead of \r\n
+        $header = str_replace("\n ", "", $header);
 
         // explode header by new line sign
         $rows = explode("\n", $header);
@@ -2936,7 +2926,7 @@ class rcube_dbmail extends rcube_storage {
             // split row by ';' to manage multiple key=>value pairs within same row
             $items = explode(';', $row);
 
-            
+
             foreach ($items as &$item) {
 
                 $item = trim($item);
@@ -2972,13 +2962,13 @@ class rcube_dbmail extends rcube_storage {
      */
     private function get_header_id_by_header_name($header_name) {
 
-	## Roundcube doesn't use some standard RFC names, so we have
-	## to normalize this.
-
-	## Roundcube "arrival" corresponds to "received", but - WARNING -
+        ## Roundcube doesn't use some standard RFC names, so we have
+        ## to normalize this.
+        ## Roundcube "arrival" corresponds to "received", but - WARNING -
         ## received isn't a required header, so the results are pretty strange
-	## maybe assuming arrival == data could be a better solution
-	if ($header_name == "arrival") $header_name = "received";
+        ## maybe assuming arrival == data could be a better solution
+        if ($header_name == "arrival")
+            $header_name = "received";
 
         $query = "SELECT id "
                 . "FROM dbmail_headername "
@@ -3090,8 +3080,7 @@ class rcube_dbmail extends rcube_storage {
      */
     private function increment_mailbox_seq($mailbox_idnr, $message_idnr = FALSE) {
 
-        if ($message_idnr == FALSE)
-        {
+        if ($message_idnr == FALSE) {
             $query = "UPDATE dbmail_mailboxes "
                     . " SET seq = (seq + 1) "
                     . " WHERE mailbox_idnr = {$this->dbmail->escape($mailbox_idnr)}";
@@ -3099,14 +3088,12 @@ class rcube_dbmail extends rcube_storage {
 
             $query = "UPDATE  dbmail_mailboxes, dbmail_messages
                         SET   dbmail_mailboxes.seq = dbmail_mailboxes.seq + 1, dbmail_messages.seq = dbmail_mailboxes.seq
-                        WHERE dbmail_mailboxes.mailbox_idnr = ".$mailbox_idnr."
-                        AND   dbmail_messages.message_idnr = ".$message_idnr;
-
+                        WHERE dbmail_mailboxes.mailbox_idnr = " . $mailbox_idnr . "
+                        AND   dbmail_messages.message_idnr = " . $message_idnr;
         }
 
         return ($this->dbmail->query($query) ? TRUE : FALSE);
     }
-
 
     /**
      * Checks if folder is subscribed
@@ -3515,7 +3502,7 @@ class rcube_dbmail extends rcube_storage {
         }
 
         ## "Base Condition" is that the message should not be EXPUNGED (thus DELETED)
-        $where_conditions = " WHERE dbmail_messages.status < ".self::MESSAGE_STATUS_DELETE; 
+        $where_conditions = " WHERE dbmail_messages.status < " . self::MESSAGE_STATUS_DELETE;
 
         // set where conditions according to supplied search / filter conditions
         if (is_object($search_conditions) && property_exists($search_conditions, 'formatted_filter_str') && strlen($search_conditions->formatted_filter_str) > 0) {
@@ -3528,9 +3515,9 @@ class rcube_dbmail extends rcube_storage {
 
         ## Do we want deleted messages?
         if ($this->options["skip_deleted"])
-            $where_conditions .= " AND dbmail_messages.deleted_flag = 0 ";       
-        
-        
+            $where_conditions .= " AND dbmail_messages.deleted_flag = 0 ";
+
+
         // set additional join tables depending by supplied sort conditions
         switch ($sort_field) {
             case 'subject':
@@ -3619,17 +3606,16 @@ class rcube_dbmail extends rcube_storage {
 
             $headers[$msg_index] = $rcmh;
 
-    		## Removing this to implement a full featured caching method
-    		# $toSess[$rcmh->uid] = $physmessage_id . ":" . $msg_index . ":" . $messagesize . ":" . $seen . ":" . $answered . ":" . $deleted . ":" . $flagged;
+            ## Removing this to implement a full featured caching method
+            # $toSess[$rcmh->uid] = $physmessage_id . ":" . $msg_index . ":" . $messagesize . ":" . $seen . ":" . $answered . ":" . $deleted . ":" . $flagged;
 
             $msg_index++;
         }
 
-    	## Removing this to implement a full featured caching method
-    	# $_SESSION['dbmail_header'] = $toSess;
+        ## Removing this to implement a full featured caching method
+        # $_SESSION['dbmail_header'] = $toSess;
 
         return $headers;
-
     }
 
     /**
@@ -3704,7 +3690,7 @@ class rcube_dbmail extends rcube_storage {
             $blob = $mimePart['data'];
 
             //console("Depth ".$depth." [".$prevdepth."] - Header ".$is_header." [".$prev_header."]");
-                        
+
             if ($is_header) {
                 $prev_boundary = $got_boundary;
 
@@ -3743,7 +3729,7 @@ class rcube_dbmail extends rcube_storage {
 
             /*
              * Code to handle the end of the body
-             */           
+             */
             if ($is_header && (!$prev_header || $prev_boundary || ($prev_header && $depth > 0 && !$prev_is_message))) {
                 //if ($is_header && (!$prev_header || $prev_boundary || ($prev_header && $depth > 0 && $prev_is_message))) {
                 if ($prevdepth > 0) {
@@ -3752,22 +3738,22 @@ class rcube_dbmail extends rcube_storage {
                 $body .= "--" . $boundary . $newline;
             }
 
-            
-            
+
+
             /*
              * Let's handle what we have in the BLOB
              * 
-             */          
-            
+             */
+
             if ($is_header && $depth == 0) {
                 $header .= $blob;
             } else {
                 $body .= $blob;
             }
 
-            
+
             $body .= $newline;
-            
+
             /*
              * Saving stuff for next iteration
              */
@@ -3778,13 +3764,13 @@ class rcube_dbmail extends rcube_storage {
             $index++;
         }
 
-        
-        
+
+
         if ($index > 2 && $boundary && !$finalized) {
             $body .= $newline . "--" . $boundary . "--" . $newline;
         }
 
-        
+
         $response = new stdClass();
         $response->header = $header;
         $response->body = $body;
@@ -3818,7 +3804,7 @@ class rcube_dbmail extends rcube_storage {
         $rcube_message_part->d_parameters = (is_array($structure->d_parameters) ? $structure->d_parameters : array());
         $rcube_message_part->ctype_parameters = (is_array($structure->ctype_parameters) ? $structure->ctype_parameters : array());
 
-        
+
         if (property_exists($structure, 'parts')) {
             foreach ($structure->parts as $part) {
                 $rcube_message_part->parts[] = $this->get_structure($part);
@@ -4224,14 +4210,14 @@ class rcube_dbmail extends rcube_storage {
             $date = DateTime::createFromFormat('Y-m-d H:i:s', $header_value);
             $escaped_date_field = ($date ? "'{$this->dbmail->escape($date->format('Y-m-d H:i:s'))}'" : "NULL");
 
-            if ($header_name=="date"){
+            if ($header_name == "date") {
                 $dt = new DateTime($this->dbmail->escape($header_value));
-                
+
                 $dt->setTimezone(new DateTimeZone('GMT'));
                 $sortfield = $dt->format('Y-m-d H:i:s');
-                $escaped_date_field = "'".$dt->format('Y-m-d 00:00:00') . "'";
-            }else{
-               $sortfield = $this->dbmail->escape($header_value);
+                $escaped_date_field = "'" . $dt->format('Y-m-d 00:00:00') . "'";
+            } else {
+                $sortfield = $this->dbmail->escape($header_value);
             }
 
             // header value doesn't exists - create it
@@ -4437,10 +4423,8 @@ class rcube_dbmail extends rcube_storage {
      *
      * @return 
      */
-     public function set_messages_caching($set, $mode = null)
-     {
-	/** Do Nothing **/
-     }
-
+    public function set_messages_caching($set, $mode = null) {
+        /** Do Nothing * */
+    }
 
 }
