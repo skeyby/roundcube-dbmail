@@ -27,6 +27,8 @@
  */
 class rcube_dbmail extends rcube_storage {
 
+    private $debug = FALSE; ## Not really useful, we use it just to track internally the debug status 
+
     private $user_idnr = null;
     private $namespace = null;
     private $delimiter = null;
@@ -326,7 +328,11 @@ class rcube_dbmail extends rcube_storage {
      * @param boolean $dbg True if conversation with the server should be logged
      */
     public function set_debug($dbg = true) {
-        // TO DO!!!!!!
+
+        /** Enable Query Logging **/
+        $this->debug($dbg);
+        $this->dbmail->set_debug($dbg);
+
     }
 
     /**
