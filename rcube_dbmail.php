@@ -162,7 +162,8 @@ class rcube_dbmail extends rcube_storage {
     }
 
     /**
-     * Connect to the server
+     * This is the function that fakes the connection to the IMAP Server
+     * Don't get confused by the name - it's not the function to connect to the DB Engine.
      *
      * @param  string   $host    Host to connect
      * @param  string   $user    Username for IMAP account
