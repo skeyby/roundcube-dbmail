@@ -3622,7 +3622,13 @@ class rcube_dbmail extends rcube_storage {
         ## Removing this to implement a full featured caching method
         # $_SESSION['dbmail_header'] = $toSess;
 
-        return $headers;
+
+        if ($slice) {
+            $headers = array_slice($headers, -$slice, $slice);
+    }
+
+        //return $headers;
+        return array_values($headers);
     }
 
     /**
