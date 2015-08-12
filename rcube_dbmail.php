@@ -2933,7 +2933,6 @@ class rcube_dbmail extends rcube_storage {
             // split row by ';' to manage multiple key=>value pairs within same row
             $items = explode(';', $row);
 
-
             foreach ($items as &$item) {
 
                 $item = trim($item);
@@ -2946,11 +2945,13 @@ class rcube_dbmail extends rcube_storage {
                     // remove trailing / leading spaces from $value
                     $value = trim($value);
 
+                    // when the header is composed, we
                     // remove trailing / leading quotes from $value
-                    $value = trim($value, "'");
-
                     // remove trailing / leading double quotes from $value
+                    if($delimiter == "=" ){
+                    $value = trim($value, "'");
                     $value = trim($value, "\"");
+                    }  
 
                     return $value;
                 }
