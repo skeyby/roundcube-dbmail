@@ -3009,18 +3009,33 @@ class rcube_dbmail extends rcube_storage {
     }
 
     /**
-     * fetch message
+     * Function to retrieve a message.
+     * In it's basic for this function, given a message_idnr, retrieves the full data set
+     * and cache the resultset into roundcube fast-lookup cache.
+     *
+     * Furthermore it can also receive the "message_data" array, thus avoiding the database lookup
+     * (and the potentially cached result) for the message flags and the physmessage_id
+     *
+     * It can optionally receive a specific physical message if in the message_data array in order to skip
+     * the physical message id lookup, if the caller aready has this information (for example
+     * when called from _list_messages).
+     * 
      * @param int $message_idnr
      * @param rcube_message_header 
      */
-    private function retrive_message($message_idnr) {
+    private function retrive_message($message_idnr, $message_data = FALSE) {
 
-        // retrive message record
-        $message_metadata = $this->get_message_record($message_idnr);
-        if (!$message_metadata) {
-            // not found
-            return FALSE;
+        // Are we receving the Message DATAS?
+        if ($message_data == FALSE) {
+            // No, so we retrive the message record
+            $message_metadata = $this->get_message_record($message_idnr);
+            if (!$message_metadata) {
+                // Message not found!
+                return FALSE;
+            }
         }
+
+        // Do we have a cached version of the message?
 
         // retrive physmessage record
         $physmessage_id = $message_metadata['physmessage_id'];
