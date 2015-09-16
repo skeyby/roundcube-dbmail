@@ -256,6 +256,7 @@ class rcube_dbmail extends rcube_storage {
         if (!$this->dbmail->query($query)) {
             return FALSE;
         }
+        return TRUE;
     }
 
     /**
@@ -3149,7 +3150,7 @@ class rcube_dbmail extends rcube_storage {
 
         $message_UIDs = array();
 
-        if (is_string($uids) && $uids == '*' && strlen($folder) > 0) {
+      if (is_string($uids) && ($uids == '*' || $uids == '1:*') && strlen($folder) > 0) {  
 
             // full folder request
             $mailbox_idnr = $this->get_mail_box_id($folder);
