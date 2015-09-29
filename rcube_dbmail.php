@@ -3058,14 +3058,14 @@ class rcube_dbmail extends rcube_storage {
         /** TO DO **/
 
         // Do we already have the message size?
-        if (! isset($message_date["message_size"])) {
+        if (! isset($message_data["message_size"])) {
             
             // No, so we have to calculate it
             $physmessage_metadata = $this->get_physmessage_record($message_data['physmessage_id']);
         if (!$physmessage_metadata) {
                 return FALSE;     // Message not found, bail out
         }
-            $message_date["message_size"] = $physmessage_metadata['messagesize'];
+            $message_data["message_size"] = $physmessage_metadata['messagesize'];
         }
 
         // Do we already have the folder name?
@@ -3103,7 +3103,7 @@ class rcube_dbmail extends rcube_storage {
         $rcmh->date = $this->get_header_value($mime->header, 'Date');
         $rcmh->internaldate = $this->get_header_value($mime->header, 'Date');
         $rcmh->messageID = $this->get_header_value($mime->header, 'Message-ID');
-        $rcmh->size = $message_date["message_size"];
+        $rcmh->size = $message_data["message_size"];
         $rcmh->timestamp = time();
         $rcmh->flags["SEEN"]     = ($message_data['seen_flag']     == 1 ? TRUE : FALSE);
         $rcmh->flags["ANSWERED"] = ($message_data['answered_flag'] == 1 ? TRUE : FALSE);
