@@ -26,6 +26,11 @@ $config['storage_driver'] = 'dbmail';
 $config['dbmail_dsn'] = 'mysql://user:pass@host/db'; # dsn connection string
 $config['dbmail_hash'] = 'sha1'; # hashing method to use, must coincide with dbmail.conf - sha1, md5, sha256, sha512, whirlpool. sha1 is the default
 $config['dbmail_fixed_headername_cache'] = FALSE; # add new headernames (if not exists) in 'dbmail_headername' when saving messages
+
+// Enable DBmail Caching
+$config["dbmail_cache"] = "db";      // Cache generica
+$config["messages_cache"] = "db";    // Cache dei messaggi
+$config["dbmail_cache_ttl"] = "10d"; // Expire della cache di default
 ```
 
 !!! IMPORTANT !!!

@@ -29,6 +29,17 @@ class rcube_dbmail extends rcube_storage {
 
     private $debug = FALSE; ## Not really useful, we use it just to track internally the debug status 
 
+    /**
+     * Instance of rcube_cache
+     *
+     * @var rcube_cache
+     */
+    protected $cache;
+
+    /** Default Settings */
+    protected $caching = false;
+    protected $messages_caching = false;
+    
     private $user_idnr = null;
     private $namespace = null;
     private $delimiter = null;
@@ -2619,28 +2630,6 @@ class rcube_dbmail extends rcube_storage {
      * ---------------------------------------- */
 
     /**
-     * Clears the cache.
-     *
-     * @param string  $key         Cache key name or pattern
-     * @param boolean $prefix_mode Enable it to clear all keys starting
-     *                             with prefix specified in $key
-     */
-    public function clear_cache($key = null, $prefix_mode = false) {
-        // TO DO!!!!!
-    }
-
-    /**
-     * Returns cached value
-     *
-     * @param string $key Cache key
-     *
-     * @return mixed Cached value
-     */
-    public function get_cache($key) {
-        // TO DO!!!!!
-    }
-
-    /**
      * Delete outdated cache entries
      */
     public function cache_gc() {
@@ -3024,44 +3013,82 @@ class rcube_dbmail extends rcube_storage {
      * @param int $message_idnr
      * @param rcube_message_header 
      */
-    private function retrive_message($message_idnr, $message_data = FALSE) {
+    private function retrive_message($message_idnr, $message_data = FALSE, $getBody = TRUE) {
 
+        $rcmh_cached = $this->get_cache("MSG_".$message_idnr);
+
+        /*
+         * Checklist:
+         *  - Is the object in cache a valid object?
+         *  - Do we need (and do we have) the message body?
+         */
+        if (is_object($rcmh_cached) && (
+                ( ! $getBody || isset($rcmh_cached->structure))
+                )) {
+
+            /*
+             * If we're in the message list we certainly have an up-to-date message listing
+             */
+            if ($message_data != FALSE) {
+            
+                $rcmh_cached->flags["SEEN"]     = ($message_data['seen_flag']     == 1 ? TRUE : FALSE);
+                $rcmh_cached->flags["ANSWERED"] = ($message_data['answered_flag'] == 1 ? TRUE : FALSE);
+                $rcmh_cached->flags["DELETED"]  = ($message_data['deleted_flag']  == 1 ? TRUE : FALSE);
+                $rcmh_cached->flags["FLAGGED"]  = ($message_data['flagged_flag']  == 1 ? TRUE : FALSE);
+
+            }
+            
+            return $rcmh_cached;
+            
+        }
+        
+        
         // Are we receving the Message DATAS?
         if ($message_data == FALSE) {
+            
             // No, so we retrive the message record
-            $message_metadata = $this->get_message_record($message_idnr);
-            if (!$message_metadata) {
+            $message_data = $this->get_message_record($message_idnr);
+            if (!$message_data) {
                 // Message not found!
                 return FALSE;
             }
         }
 
         // Do we have a cached version of the message?
+        /** TO DO **/
 
-        // retrive physmessage record
-        $physmessage_id = $message_metadata['physmessage_id'];
-        $physmessage_metadata = $this->get_physmessage_record($physmessage_id);
+        // Do we already have the message size?
+        if (! isset($message_date["message_size"])) {
+            
+            // No, so we have to calculate it
+            $physmessage_metadata = $this->get_physmessage_record($message_data['physmessage_id']);
         if (!$physmessage_metadata) {
-            // not found
-            return FALSE;
+                return FALSE;     // Message not found, bail out
+        }
+            $message_date["message_size"] = $physmessage_metadata['messagesize'];
         }
 
-        // retrive folder record
-        $mailbox_idnr = $message_metadata['mailbox_idnr'];
-        $folder_record = $this->get_folder_record($mailbox_idnr);
-        if (!$folder_record) {
-            // not found
-            return FALSE;
+        // Do we already have the folder name?
+        if (! isset($message_data['folder_record'])) {
+            
+            // No, so we have to find it
+            $tmpFolder = $this->get_folder_record($message_data['mailbox_idnr']);
+            
+            if (! $tmpFolder) {
+                return FALSE; // Folder not found, bail out
+        }
+
+            $message_data["folder_record"]["name"] = $tmpFolder["name"];
         }
 
         // extract mime parts
-        $mime = $this->fetch_part_lists($physmessage_id);
+        $mime = $this->fetch_part_lists($message_data['physmessage_id']);
 
         // prepare response
         $rcmh = new rcube_message_header();
         $rcmh->id = $message_idnr;
         $rcmh->uid = $message_idnr;
-        $rcmh->folder = $folder_record['name'];
+        $rcmh->folder = $message_data['folder_record']['name'];
         $rcmh->subject = $this->get_header_value($mime->header, 'Subject');
         $rcmh->from = $this->get_header_value($mime->header, 'From');
         $rcmh->to = $this->get_header_value($mime->header, 'To');
@@ -3076,13 +3103,15 @@ class rcube_dbmail extends rcube_storage {
         $rcmh->date = $this->get_header_value($mime->header, 'Date');
         $rcmh->internaldate = $this->get_header_value($mime->header, 'Date');
         $rcmh->messageID = $this->get_header_value($mime->header, 'Message-ID');
-        $rcmh->size = $physmessage_metadata['messagesize'];
+        $rcmh->size = $message_date["message_size"];
         $rcmh->timestamp = time();
-        $rcmh->flags["SEEN"] = ($message_metadata['seen_flag'] == 1 ? TRUE : FALSE);
-        $rcmh->flags["ANSWERED"] = ($message_metadata['answered_flag'] == 1 ? TRUE : FALSE);
-        $rcmh->flags["DELETED"] = ($message_metadata['deleted_flag'] == 1 ? TRUE : FALSE);
-        $rcmh->flags["FLAGGED"] = ($message_metadata['flagged_flag'] == 1 ? TRUE : FALSE);
+        $rcmh->flags["SEEN"]     = ($message_data['seen_flag']     == 1 ? TRUE : FALSE);
+        $rcmh->flags["ANSWERED"] = ($message_data['answered_flag'] == 1 ? TRUE : FALSE);
+        $rcmh->flags["DELETED"]  = ($message_data['deleted_flag']  == 1 ? TRUE : FALSE);
+        $rcmh->flags["FLAGGED"]  = ($message_data['flagged_flag']  == 1 ? TRUE : FALSE);
 
+        if ($getBody) {
+        
         $mime_decoded = $this->decode_raw_message($mime->header . $mime->body);
         if (!$mime_decoded) {
             return FALSE;
@@ -3090,6 +3119,10 @@ class rcube_dbmail extends rcube_storage {
 
         $rcmh->structure = $this->get_structure($mime_decoded);
 
+        }
+        
+        $this->update_cache("MSG_".$message_idnr, $rcmh);
+        
         return $rcmh;
     }
 
@@ -3592,43 +3625,17 @@ class rcube_dbmail extends rcube_storage {
 
         while ($msg = $this->dbmail->fetch_assoc($res)) {
 
-            $message_idnr = $msg['message_idnr'];
-            $physmessage_id = $msg['physmessage_id'];
-            $messagesize = $msg['messagesize'];
-            $seen = $msg['seen_flag'];
-            $answered = $msg['answered_flag'];
-            $deleted = $msg['deleted_flag'];
-            $flagged = $msg['flagged_flag'];
+            $message_data["message_idnr"]   = $msg["message_idnr"];
+            $message_data["physmessage_id"] = $msg['physmessage_id'];
+            $message_data["message_size"]   = $msg["messagesize"];
+            $message_data["seen_flag"]      = $msg["seen_flag"];
+            $message_data["answered_flag"]  = $msg["answered_flag"];
+            $message_data["deleted_flag"]   = $msg["deleted_flag"];
+            $message_data["flagged_flag"]   = $msg["flagged_flag"];
+            $message_data["folder_record"]["name"] = $folder;
+            $message_data["mailbox_idnr"]   = $mailbox_idnr;
 
-            $message_headers = $this->get_physmessage_headers($physmessage_id);
-
-            $imploded_headers = '';
-            foreach ($message_headers as $header_name => $header_value) {
-                $imploded_headers .= $header_name . $this->get_header_delimiter($header_name) . $header_value . "\n";
-            }
-
-            $rcmh = new rcube_message_header();
-            $rcmh->id = $msg_index;
-            $rcmh->uid = $message_idnr;
-            $rcmh->ctype = $this->get_header_value($imploded_headers, 'content-type');
-            $rcmh->folder = $folder;
-            $rcmh->subject = $this->get_header_value($imploded_headers, 'subject');
-            //console("---->" . $this->get_header_value($imploded_headers, 'from'));
-            $rcmh->from = $this->get_header_value($imploded_headers, 'from');
-            $rcmh->to = $this->get_header_value($imploded_headers, 'to');
-            $rcmh->replyto = $this->get_header_value($imploded_headers, 'return-path');
-            $rcmh->in_reply_to = $this->get_header_value($imploded_headers, 'return-path');
-            $rcmh->date = $this->get_header_value($imploded_headers, 'date');
-            $rcmh->internaldate = $this->get_header_value($imploded_headers, 'date');
-            $rcmh->messageID = "mid:" . $msg_index;
-            $rcmh->size = $messagesize;
-            $rcmh->timestamp = time();
-            $rcmh->flags["SEEN"] = $seen;
-            $rcmh->flags["ANSWERED"] = $answered;
-            $rcmh->flags["DELETED"] = $deleted;
-            $rcmh->flags["FLAGGED"] = $flagged;
-
-            $headers[$msg_index] = $rcmh;
+            $headers[$msg_index] = $this->retrive_message($message_data["message_idnr"], $message_data, FALSE);
 
             ## Removing this to implement a full featured caching method
             # $toSess[$rcmh->uid] = $physmessage_id . ":" . $msg_index . ":" . $messagesize . ":" . $seen . ":" . $answered . ":" . $deleted . ":" . $flagged;
@@ -4444,17 +4451,101 @@ class rcube_dbmail extends rcube_storage {
         return array();
     }
 
+    /* --------------------------------
+     * Caching methods
+     * --------------------------------
+     * 
+     * We don't differentiate between caching types
+     * as we basically always use a key->value cache
+     * 
+     */
+
+    
     /**
-     * Enable message caching.
-     * Currently not yet implemented
+     * Enable or disable GENERAL cache
+     *
+     * @param string $type Cache type (@see rcube::get_cache)
+     */
+    public function set_caching($type)
+    {
+        if ($type) {
+            $this->caching = $type;
+        }
+        else {
+            if ($this->cache) {
+                $this->cache->close();
+            }
+            $this->cache   = null;
+            $this->caching = false;
+        }
+    }    
+    
+
+    /**
+     * Common initialization for the cache engine
+     */
+    protected function get_cache_engine()
+    {
+        if ($this->caching && !$this->cache) {
+            $rcube = rcube::get_instance();
+            $ttl   = $rcube->config->get('dbmail_cache_ttl', '10d');
+            $this->cache = $rcube->get_cache('DBMAIL', $this->caching, $ttl);
+        }
+
+        return $this->cache;
+    }
+
+    /**
+     * Returns cached value
+     *
+     * @param string $key Cache key
+     *
+     * @return mixed
+     */
+    public function get_cache($key)
+    {
+        if ($cache = $this->get_cache_engine()) {
+            return $cache->get($key);
+        }
+    }
+
+    /**
+     * Update cache
+     *
+     * @param string $key  Cache key
+     * @param mixed  $data Data
+     */
+    public function update_cache($key, $data)
+    {
+        if ($cache = $this->get_cache_engine()) {
+            $cache->set($key, $data);
+        }
+    }
+
+    /**
+     * Clears the cache.
+     *
+     * @param string  $key         Cache key name or pattern
+     * @param boolean $prefix_mode Enable it to clear all keys starting
+     *                             with prefix specified in $key
+     */
+    public function clear_cache($key = null, $prefix_mode = false)
+    {
+        if ($cache = $this->get_cache_engine()) {
+            $cache->remove($key, $prefix_mode);
+        }
+    }
+
+    /**
+     * Enable or disable messages caching
      *
      * @param bool $enable Enable or disable caching
-     * @param int     $mode Cache mode
-     *
+     * @param int  
      * @return 
      */
-    public function set_messages_caching($set, $mode = null) {
-        /** Do Nothing * */
+    public function set_messages_caching($set, $mode = null)
+    {
+        /* Not used as we rely on general cache */
     }
 
 }
