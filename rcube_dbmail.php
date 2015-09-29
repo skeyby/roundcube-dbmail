@@ -3031,6 +3031,7 @@ class rcube_dbmail extends rcube_storage {
              */
             if ($message_data != FALSE) {
             
+                $rcmh_cached->folder = $message_data['folder_record']['name'];
                 $rcmh_cached->flags["SEEN"]     = ($message_data['seen_flag']     == 1 ? TRUE : FALSE);
                 $rcmh_cached->flags["ANSWERED"] = ($message_data['answered_flag'] == 1 ? TRUE : FALSE);
                 $rcmh_cached->flags["DELETED"]  = ($message_data['deleted_flag']  == 1 ? TRUE : FALSE);
