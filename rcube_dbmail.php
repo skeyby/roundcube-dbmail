@@ -2900,10 +2900,12 @@ class rcube_dbmail extends rcube_storage {
         $header = trim($header);
 
         ## Unfolding according to RFC 2822, chapter 2.2.3
-        $header = str_replace("\r\n ", "", $header);
+        $header = str_replace("\r\n ", " ", $header);
+        $header = str_replace("\r\n\t", " ", $header);
         ## Unfolding with compatibility with some non-standard mailers
         ## that only add \n instead of \r\n
-        $header = str_replace("\n ", "", $header);
+        $header = str_replace("\n ", " ", $header);
+        $header = str_replace("\n\t", " ", $header);
 
         // explode header by new line sign
         $rows = explode("\n", $header);
