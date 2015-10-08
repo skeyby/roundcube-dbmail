@@ -4257,7 +4257,7 @@ class rcube_dbmail extends rcube_storage {
                 $sortfield = $dt->format('Y-m-d H:i:s');
                 $escaped_date_field = "'" . $dt->format('Y-m-d 00:00:00') . "'";
             } else {
-                $sortfield = $this->dbmail->escape($header_value);
+                $sortfield = substr($this->dbmail->escape($header_value), 0, 254);
             }
 
             // header value doesn't exists - create it

@@ -29,7 +29,7 @@ $config['dbmail_fixed_headername_cache'] = FALSE; # add new headernames (if not
 
 // Enable DBmail Caching
 $config["dbmail_cache"] = "db";      // Generic cache switch
-$config["messages_cache"] = "db";    // Cache for messages. We don't use it
+$config["messages_cache"] = TRUE;    // Cache for messages. We don't use it
 $config["dbmail_cache_ttl"] = "10d"; // Cache default expire value
 ```
 
