@@ -374,6 +374,15 @@ class rcube_dbmail extends rcube_storage {
     }
 
     /**
+     * Backward compatibility with IMAP stuff
+     *
+     *  set_mailbox == set_folder
+     */
+    public function set_mailbox($folder) {
+	$this->set_folder($folder);
+    }
+
+    /**
      * Returns the currently used folder name
      *
      * @return string Name of the folder
