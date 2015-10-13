@@ -2251,6 +2251,11 @@ class rcube_dbmail extends rcube_storage {
      */
     public function folder_info($folder) {
 
+	$folder_cached = $this->get_cache("FOLDER_".$folder);
+	if (is_object($folder_cached)) {
+		return $folder_cached;
+	}
+
         $folderAttributes = $this->folder_attributes($folder);
         $folderRights = $this->get_acl($folder);
 
@@ -2263,7 +2268,9 @@ class rcube_dbmail extends rcube_storage {
             'noselect' => (array_key_exists('no_select', $folderAttributes) ? $folderAttributes['no_select'] : FALSE),
             'rights' => $folderRights,
             'norename' => (in_array('d', $folderRights) ? FALSE : TRUE)
-        );
+	);
+
+	$this->update_cache("FOLDER_".$folder, $options);
 
         return $options;
     }
