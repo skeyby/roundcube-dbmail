@@ -12,9 +12,7 @@
  *    $config['dbmail_dsn'] = 'mysql://user:pass@host/db';  # dsn connection string
  *    $config['dbmail_hash'] = 'sha1';                      # hashing method to use, must coincide with dbmail.conf - sha1, md5, sha256, sha512, whirlpool. sha1 is the default
  *    $config['dbmail_fixed_headername_cache'] = FALSE;     # add new headernames (if not exists) in 'dbmail_headername' when saving messages
- * 3. (OPTIONALLY - TO ENABLE CONTENTS CACHEING) 
- *    $config['dbmail_cache'] = 'db';                       # Generic cache switch
- *    $config['messages_cache'] = TRUE;                     # Cache for messages. We don't use it
+ *    $config['dbmail_cache'] = 'db';                       # Generic cache switch. FALSE (to disable cache) / 'db' / 'memcache' / 'apc'
  *    $config['dbmail_cache_ttl'] = '10d';                  # Cache default expire value
  * 
  * !!! IMPORTANT !!!
@@ -142,17 +140,17 @@ class rcube_dbmail extends rcube_storage {
     /**
      *  ACLs mapping flags
      */
-    const ACl_LOOKUP_FLAG = 'l';
-    const ACl_READ_FLAG = 'r';
-    const ACl_SEEN_FLAG = 's';
-    const ACl_WRITE_FLAG = 'w';
-    const ACl_INSERT_FLAG = 'i';
-    const ACl_POST_FLAG = 'p';
-    const ACl_CREATE_FLAG = 'k';
-    const ACl_DELETE_FLAG = 'x';
-    const ACl_DELETED_FLAG = 't';
-    const ACl_EXPUNGE_FLAG = 'e';
-    const ACl_ADMINISTER_FLAG = 'a';
+    const ACL_LOOKUP_FLAG = 'l';
+    const ACL_READ_FLAG = 'r';
+    const ACL_SEEN_FLAG = 's';
+    const ACL_WRITE_FLAG = 'w';
+    const ACL_INSERT_FLAG = 'i';
+    const ACL_POST_FLAG = 'p';
+    const ACL_CREATE_FLAG = 'k';
+    const ACL_DELETE_FLAG = 'x';
+    const ACL_DELETED_FLAG = 't';
+    const ACL_EXPUNGE_FLAG = 'e';
+    const ACL_ADMINISTER_FLAG = 'a';
 
     /**
      *  Public userId
@@ -286,7 +284,7 @@ class rcube_dbmail extends rcube_storage {
 
         // ACLs check ('expunge' grant required )
         $ACLs = $this->_get_acl(NULL, $mailbox_idnr);
-        if (!is_array($ACLs) || !in_array(self::ACl_EXPUNGE_FLAG, $ACLs)) {
+        if (!is_array($ACLs) || !in_array(self::ACL_EXPUNGE_FLAG, $ACLs)) {
             // Unauthorized!
             return FALSE;
         }
@@ -627,7 +625,7 @@ class rcube_dbmail extends rcube_storage {
          *  ACLs check ('lookup' and 'read' grants required )
          */
         $ACLs = $this->_get_acl(NULL, $mailbox_idnr);
-        if (!is_array($ACLs) || !in_array(self::ACl_LOOKUP_FLAG, $ACLs) || !in_array(self::ACl_READ_FLAG, $ACLs)) {
+        if (!is_array($ACLs) || !in_array(self::ACL_LOOKUP_FLAG, $ACLs) || !in_array(self::ACL_READ_FLAG, $ACLs)) {
             /**
              *  Unauthorized!
              */
@@ -715,7 +713,7 @@ class rcube_dbmail extends rcube_storage {
 
         // ACLs check ('lookup' and 'read' grants required )
         $ACLs = $this->_get_acl(NULL, $mailbox_idnr);
-        if (!is_array($ACLs) || !in_array(self::ACl_LOOKUP_FLAG, $ACLs) || !in_array(self::ACl_READ_FLAG, $ACLs)) {
+        if (!is_array($ACLs) || !in_array(self::ACL_LOOKUP_FLAG, $ACLs) || !in_array(self::ACL_READ_FLAG, $ACLs)) {
             // Unauthorized!
             return FALSE;
         }
@@ -839,7 +837,7 @@ class rcube_dbmail extends rcube_storage {
 
         // ACLs check ('lookup' and 'read' grants required )
         $ACLs = $this->_get_acl($folder);
-        if (!is_array($ACLs) || !in_array(self::ACl_LOOKUP_FLAG, $ACLs) || !in_array(self::ACl_READ_FLAG, $ACLs)) {
+        if (!is_array($ACLs) || !in_array(self::ACL_LOOKUP_FLAG, $ACLs) || !in_array(self::ACL_READ_FLAG, $ACLs)) {
             // Unauthorized!
             return FALSE;
         }
@@ -890,7 +888,7 @@ class rcube_dbmail extends rcube_storage {
 
             // ACLs check ('lookup' and 'read' grants required )
             $ACLs = $this->_get_acl(NULL, $mail_box_idnr);
-            if (!is_array($ACLs) || !in_array(self::ACl_LOOKUP_FLAG, $ACLs) || !in_array(self::ACl_READ_FLAG, $ACLs)) {
+            if (!is_array($ACLs) || !in_array(self::ACL_LOOKUP_FLAG, $ACLs) || !in_array(self::ACL_READ_FLAG, $ACLs)) {
                 // Unauthorized - Skip!
                 continue;
             }
@@ -951,7 +949,7 @@ class rcube_dbmail extends rcube_storage {
 
             // ACLs check ('lookup' and 'read' grants required )
             $ACLs = $this->_get_acl(NULL, $mail_box_idnr);
-            if (!is_array($ACLs) || !in_array(self::ACl_LOOKUP_FLAG, $ACLs) || !in_array(self::ACl_READ_FLAG, $ACLs)) {
+            if (!is_array($ACLs) || !in_array(self::ACL_LOOKUP_FLAG, $ACLs) || !in_array(self::ACL_READ_FLAG, $ACLs)) {
                 // Unauthorized - Skip!
                 continue;
             }
@@ -1025,7 +1023,7 @@ class rcube_dbmail extends rcube_storage {
 
         // ACLs check ('read' grant required )
         $ACLs = $this->_get_acl(NULL, $message_metadata['mailbox_idnr']);
-        if (!is_array($ACLs) || !in_array(self::ACl_READ_FLAG, $ACLs)) {
+        if (!is_array($ACLs) || !in_array(self::ACL_READ_FLAG, $ACLs)) {
             // Unauthorized!
             return FALSE;
         }
@@ -1057,7 +1055,7 @@ class rcube_dbmail extends rcube_storage {
 
         // ACLs check ('read' grant required )
         $ACLs = $this->_get_acl(NULL, $message_metadata['mailbox_idnr']);
-        if (!is_array($ACLs) || !in_array(self::ACl_READ_FLAG, $ACLs)) {
+        if (!is_array($ACLs) || !in_array(self::ACL_READ_FLAG, $ACLs)) {
             // Unauthorized!
             return FALSE;
         }
@@ -1095,7 +1093,7 @@ class rcube_dbmail extends rcube_storage {
 
         // ACLs check ('read' grant required )
         $ACLs = $this->_get_acl(NULL, $message_metadata['mailbox_idnr']);
-        if (!is_array($ACLs) || !in_array(self::ACl_READ_FLAG, $ACLs)) {
+        if (!is_array($ACLs) || !in_array(self::ACL_READ_FLAG, $ACLs)) {
             // Unauthorized!
             return FALSE;
         }
@@ -1159,7 +1157,7 @@ class rcube_dbmail extends rcube_storage {
 
         // ACLs check ('read' grant required )
         $ACLs = $this->_get_acl(NULL, $message_metadata['mailbox_idnr']);
-        if (!is_array($ACLs) || !in_array(self::ACl_READ_FLAG, $ACLs)) {
+        if (!is_array($ACLs) || !in_array(self::ACL_READ_FLAG, $ACLs)) {
             // Unauthorized!
             return FALSE;
         }
@@ -1188,7 +1186,7 @@ class rcube_dbmail extends rcube_storage {
 
         // ACLs check ('read' grant required )
         $ACLs = $this->_get_acl(NULL, $message_metadata['mailbox_idnr']);
-        if (!is_array($ACLs) || !in_array(self::ACl_READ_FLAG, $ACLs)) {
+        if (!is_array($ACLs) || !in_array(self::ACL_READ_FLAG, $ACLs)) {
             // Unauthorized!
             return FALSE;
         }
@@ -1244,32 +1242,32 @@ class rcube_dbmail extends rcube_storage {
             case 'UNDELETED':
                 $flag_field = 'deleted_flag';
                 $flag_value = 0;
-                $required_ACL = self::ACl_DELETED_FLAG;
+                $required_ACL = self::ACL_DELETED_FLAG;
                 break;
             case 'DELETED':
                 $flag_field = 'deleted_flag';
                 $flag_value = 1;
-                $required_ACL = self::ACl_DELETED_FLAG;
+                $required_ACL = self::ACL_DELETED_FLAG;
                 break;
             case 'SEEN':
                 $flag_field = 'seen_flag';
                 $flag_value = 1;
-                $required_ACL = self::ACl_SEEN_FLAG;
+                $required_ACL = self::ACL_SEEN_FLAG;
                 break;
             case 'UNSEEN':
                 $flag_field = 'seen_flag';
                 $flag_value = 0;
-                $required_ACL = self::ACl_SEEN_FLAG;
+                $required_ACL = self::ACL_SEEN_FLAG;
                 break;
             case 'FLAGGED':
                 $flag_field = 'flagged_flag';
                 $flag_value = 1;
-                $required_ACL = self::ACl_WRITE_FLAG;
+                $required_ACL = self::ACL_WRITE_FLAG;
                 break;
             case 'UNFLAGGED':
                 $flag_field = 'flagged_flag';
                 $flag_value = 0;
-                $required_ACL = self::ACl_WRITE_FLAG;
+                $required_ACL = self::ACL_WRITE_FLAG;
                 break;
             default:
                 // invalid flag supplied
@@ -1384,7 +1382,7 @@ class rcube_dbmail extends rcube_storage {
 
         // ACLs check ('insert' grant required )
         $ACLs = $this->_get_acl($folder);
-        if (!is_array($ACLs) || !in_array(self::ACl_INSERT_FLAG, $ACLs)) {
+        if (!is_array($ACLs) || !in_array(self::ACL_INSERT_FLAG, $ACLs)) {
             // Unauthorized!
             return FALSE;
         }
@@ -1539,7 +1537,7 @@ class rcube_dbmail extends rcube_storage {
 
         // ACLs check ('insert' grant required for destination folder)
         $to_mailbox_ACLs = $this->_get_acl($to);
-        if (!is_array($to_mailbox_ACLs) || !in_array(self::ACl_INSERT_FLAG, $to_mailbox_ACLs)) {
+        if (!is_array($to_mailbox_ACLs) || !in_array(self::ACL_INSERT_FLAG, $to_mailbox_ACLs)) {
             // Unauthorized!
             return FALSE;
         }
@@ -1568,7 +1566,7 @@ class rcube_dbmail extends rcube_storage {
 
             // ACLs check ('read' grant required )
             $ACLs = $this->_get_acl(NULL, $message_metadata['mailbox_idnr']);
-            if (!is_array($ACLs) || !in_array(self::ACl_READ_FLAG, $ACLs)) {
+            if (!is_array($ACLs) || !in_array(self::ACL_READ_FLAG, $ACLs)) {
                 // Unauthorized!
                 return FALSE;
             }
@@ -1621,7 +1619,7 @@ class rcube_dbmail extends rcube_storage {
 
         // ACLs check ('insert' grant required for destination folder)
         $to_mailbox_ACLs = $this->_get_acl($to);
-        if (!is_array($to_mailbox_ACLs) || !in_array(self::ACl_INSERT_FLAG, $to_mailbox_ACLs)) {
+        if (!is_array($to_mailbox_ACLs) || !in_array(self::ACL_INSERT_FLAG, $to_mailbox_ACLs)) {
             // Unauthorized!
             return FALSE;
         }
@@ -1650,7 +1648,7 @@ class rcube_dbmail extends rcube_storage {
 
             // ACLs check ('read' grant required )
             $ACLs = $this->_get_acl(NULL, $message_metadata['mailbox_idnr']);
-            if (!is_array($ACLs) || !in_array(self::ACl_READ_FLAG, $ACLs)) {
+            if (!is_array($ACLs) || !in_array(self::ACL_READ_FLAG, $ACLs)) {
                 // Unauthorized!
                 return FALSE;
             }
@@ -1770,7 +1768,7 @@ class rcube_dbmail extends rcube_storage {
 
             // ACLs check ('deleted' and 'expunge' grants required )
             $ACLs = $this->_get_acl(NULL, $message_metadata['mailbox_idnr']);
-            if (!is_array($ACLs) || !in_array(self::ACl_DELETED_FLAG, $ACLs) || !in_array(self::ACl_EXPUNGE_FLAG, $ACLs)) {
+            if (!is_array($ACLs) || !in_array(self::ACL_DELETED_FLAG, $ACLs) || !in_array(self::ACL_EXPUNGE_FLAG, $ACLs)) {
                 // Unauthorized!
                 return FALSE;
             }
@@ -1867,7 +1865,7 @@ class rcube_dbmail extends rcube_storage {
 
                 // ACLs check ('deleted' and 'expunge' grants required )
                 $ACLs = $this->_get_acl(NULL, $message_metadata['mailbox_idnr']);
-                if (!is_array($ACLs) || !in_array(self::ACl_DELETED_FLAG, $ACLs) || !in_array(self::ACl_EXPUNGE_FLAG, $ACLs)) {
+                if (!is_array($ACLs) || !in_array(self::ACL_DELETED_FLAG, $ACLs) || !in_array(self::ACL_EXPUNGE_FLAG, $ACLs)) {
                     // Unauthorized!
                     $this->dbmail->rollbackTransaction();
                     return FALSE;
@@ -2116,7 +2114,7 @@ class rcube_dbmail extends rcube_storage {
 
             // ACLs check ('create' grant required )
             $ACLs = $this->_get_acl($parentFolder);
-            if (!is_array($ACLs) || !in_array(self::ACl_CREATE_FLAG, $ACLs)) {
+            if (!is_array($ACLs) || !in_array(self::ACL_CREATE_FLAG, $ACLs)) {
                 // Unauthorized!
                 return FALSE;
             }
@@ -2211,7 +2209,7 @@ class rcube_dbmail extends rcube_storage {
 
         // ACLs check ('create' grant required )
         $ACLs = $this->_get_acl($folder);
-        if (!is_array($ACLs) || !in_array(self::ACl_CREATE_FLAG, $ACLs)) {
+        if (!is_array($ACLs) || !in_array(self::ACL_CREATE_FLAG, $ACLs)) {
             // Unauthorized!
             return FALSE;
         }
@@ -2316,7 +2314,7 @@ class rcube_dbmail extends rcube_storage {
 
         // ACLs check ('delete' grant required )
         $ACLs = $this->_get_acl(NULL, $mailbox_idnr);
-        if (!is_array($ACLs) || !in_array(self::ACl_DELETE_FLAG, $ACLs)) {
+        if (!is_array($ACLs) || !in_array(self::ACL_DELETE_FLAG, $ACLs)) {
             // Unauthorized!
             return FALSE;
         }
@@ -2338,7 +2336,7 @@ class rcube_dbmail extends rcube_storage {
                 // ACLs check ('delete' grant required )
                 $ACLs = $this->_get_acl(NULL, $sub_folder_idnr);
 
-                if (!is_array($ACLs) || !in_array(self::ACl_DELETE_FLAG, $ACLs)) {
+                if (!is_array($ACLs) || !in_array(self::ACL_DELETE_FLAG, $ACLs)) {
                     // Unauthorized!
                     return FALSE;
                 }
@@ -2551,7 +2549,7 @@ class rcube_dbmail extends rcube_storage {
             'special' => (in_array($folder, self::$folder_types) ? TRUE : FALSE),
             'noselect' => (array_key_exists('no_select', $folderAttributes) ? $folderAttributes['no_select'] : FALSE),
             'rights' => $folderRights,
-            'norename' => (in_array(self::ACl_DELETE_FLAG, $folderRights) ? FALSE : TRUE)
+            'norename' => (in_array(self::ACL_DELETE_FLAG, $folderRights) ? FALSE : TRUE)
         );
 
         $this->update_cache("FOLDER_" . $folder, $options);
@@ -2990,17 +2988,17 @@ class rcube_dbmail extends rcube_storage {
              * Owned mailbox - return full ACLs list
              */
             return array(
-                self::ACl_LOOKUP_FLAG,
-                self::ACl_READ_FLAG,
-                self::ACl_SEEN_FLAG,
-                self::ACl_WRITE_FLAG,
-                self::ACl_INSERT_FLAG,
-                self::ACl_POST_FLAG,
-                self::ACl_CREATE_FLAG,
-                self::ACl_DELETE_FLAG,
-                self::ACl_DELETED_FLAG,
-                self::ACl_EXPUNGE_FLAG,
-                self::ACl_ADMINISTER_FLAG
+                self::ACL_LOOKUP_FLAG,
+                self::ACL_READ_FLAG,
+                self::ACL_SEEN_FLAG,
+                self::ACL_WRITE_FLAG,
+                self::ACL_INSERT_FLAG,
+                self::ACL_POST_FLAG,
+                self::ACL_CREATE_FLAG,
+                self::ACL_DELETE_FLAG,
+                self::ACL_DELETED_FLAG,
+                self::ACL_EXPUNGE_FLAG,
+                self::ACL_ADMINISTER_FLAG
             );
         }
 
@@ -3026,47 +3024,47 @@ class rcube_dbmail extends rcube_storage {
         $ACLs = array();
 
         if ($sharedMailboxACLs['lookup_flag'] == 1) {
-            $ACLs[] = self::ACl_LOOKUP_FLAG;
+            $ACLs[] = self::ACL_LOOKUP_FLAG;
         }
 
         if ($sharedMailboxACLs['read_flag'] == 1) {
-            $ACLs[] = self::ACl_READ_FLAG;
+            $ACLs[] = self::ACL_READ_FLAG;
         }
 
         if ($sharedMailboxACLs['seen_flag'] == 1) {
-            $ACLs[] = self::ACl_SEEN_FLAG;
+            $ACLs[] = self::ACL_SEEN_FLAG;
         }
 
         if ($sharedMailboxACLs['write_flag'] == 1) {
-            $ACLs[] = self::ACl_WRITE_FLAG;
+            $ACLs[] = self::ACL_WRITE_FLAG;
         }
 
         if ($sharedMailboxACLs['insert_flag'] == 1) {
-            $ACLs[] = self::ACl_INSERT_FLAG;
+            $ACLs[] = self::ACL_INSERT_FLAG;
         }
 
         if ($sharedMailboxACLs['post_flag'] == 1) {
-            $ACLs[] = self::ACl_POST_FLAG;
+            $ACLs[] = self::ACL_POST_FLAG;
         }
 
         if ($sharedMailboxACLs['create_flag'] == 1) {
-            $ACLs[] = self::ACl_CREATE_FLAG;
+            $ACLs[] = self::ACL_CREATE_FLAG;
         }
 
         if ($sharedMailboxACLs['delete_flag'] == 1) {
-            $ACLs[] = self::ACl_DELETE_FLAG;
+            $ACLs[] = self::ACL_DELETE_FLAG;
         }
 
         if ($sharedMailboxACLs['deleted_flag'] == 1) {
-            $ACLs[] = self::ACl_DELETED_FLAG;
+            $ACLs[] = self::ACL_DELETED_FLAG;
         }
 
         if ($sharedMailboxACLs['expunge_flag'] == 1) {
-            $ACLs[] = self::ACl_EXPUNGE_FLAG;
+            $ACLs[] = self::ACL_EXPUNGE_FLAG;
         }
 
         if ($sharedMailboxACLs['administer_flag'] == 1) {
-            $ACLs[] = self::ACl_ADMINISTER_FLAG;
+            $ACLs[] = self::ACL_ADMINISTER_FLAG;
         }
 
         return $ACLs;
@@ -3655,36 +3653,28 @@ class rcube_dbmail extends rcube_storage {
      * @param int $message_idnr
      * @param array $message_data 
      * @param boolean $getBody whenever to retrieve body content too (instead of headers only)
-     * @param boolean $force whenever to skip reading from cached contents (if found)
      * @return mixed
      */
-    private function retrieve_message($message_idnr, $message_data = FALSE, $getBody = TRUE, $force = FALSE) {
-
-        /*
-         * Set cache keys
-         */
-        $rcmh_cached_key = "MSG_" . $message_idnr;
-        $message_data_cached_key = "MSG_DATA" . $message_idnr;
+    private function retrieve_message($message_idnr, $message_data = FALSE, $getBody = TRUE) {
 
         /*
          * Get cached contents
          */
+        $rcmh_cached_key = "MSG_" . $message_idnr;
         $rcmh_cached = $this->get_cache($rcmh_cached_key);
-        $message_data_cached = $this->get_cache($message_data_cached_key);
 
         /*
          * Checklist:
          *  - Is the object in cache a valid object?
          *  - Do we need (and do we have) the message body?
          */
-        if (!$force &&
-                is_object($rcmh_cached) &&
+        if (is_object($rcmh_cached) &&
                 (!$getBody || isset($rcmh_cached->structure))) {
 
             /*
              * If we're in the message list we certainly have an up-to-date message listing
              */
-            if ($message_data != FALSE) {
+            if (is_array($message_data)) {
 
                 $rcmh_cached->folder = $message_data['folder_record']['name'];
                 $rcmh_cached->flags["SEEN"] = ($message_data['seen_flag'] == 1 ? TRUE : FALSE);
@@ -3699,17 +3689,8 @@ class rcube_dbmail extends rcube_storage {
         /*
          * Get message data (if not supplied)
          */
+        if (!$message_data) {
 
-        if (!$message_data && is_array($message_data_cached) && !$force) {
-
-            /*
-             * Message_data not supplied but found a valid cached copy
-             */
-            $message_data = $message_data_cached;
-        } elseif (!$message_data) {
-            /*
-             * Message data not supplied and no cached copy found OR flag 'force reload' supplied
-             */
             /*
              * Get message properties
              */
@@ -3787,7 +3768,6 @@ class rcube_dbmail extends rcube_storage {
 
         // update cached contents
         $this->update_cache($rcmh_cached_key, $rcmh);
-        $this->update_cache($message_data_cached_key, $message_data);
 
         return $rcmh;
     }
@@ -4216,7 +4196,7 @@ class rcube_dbmail extends rcube_storage {
          *  ACLs check ('lookup' and 'read' grants required )
          */
         $ACLs = $this->_get_acl(NULL, $mailbox_idnr);
-        if (!is_array($ACLs) || !in_array(self::ACl_LOOKUP_FLAG, $ACLs) || !in_array(self::ACl_READ_FLAG, $ACLs)) {
+        if (!is_array($ACLs) || !in_array(self::ACL_LOOKUP_FLAG, $ACLs) || !in_array(self::ACL_READ_FLAG, $ACLs)) {
             /*
              *  Unauthorized!
              */
@@ -5210,30 +5190,7 @@ class rcube_dbmail extends rcube_storage {
      */
     protected function set_folder_stats($folder, $name, $data) {
 
-        // $_SESSION['folders'][$folder][$name] = $data;
-
-        /*
-         * Cached content exists?
-         */
-        $cache_key = "Folder_stats_{$folder}";
-        $cache_content = $this->get_cache($cache_key);
-
-        /*
-         * Validate cached content
-         */
-        if (!$cache_content || !is_array($cache_content)) {
-            $cache_content = array();
-        }
-
-        /*
-         * Set / override folder propery
-         */
-        $cache_content[$name] = $data;
-
-        /*
-         * Store updated JSON encoded content
-         */
-        $this->update_cache($cache_key, $cache_content);
+        $_SESSION['folders'][$folder][$name] = $data;
     }
 
     /**
@@ -5245,22 +5202,7 @@ class rcube_dbmail extends rcube_storage {
      */
     protected function get_folder_stats($folder) {
 
-        // return ($_SESSION['folders'][$folder] ? (array) $_SESSION['folders'][$folder] : array());
-
-        /*
-         * Cached content exists?
-         */
-        $cache_key = "Folder_stats_{$folder}";
-        $cache_content = $this->get_cache($cache_key);
-
-        /*
-         * Validate cached content
-         */
-        if (!$cache_content || !is_array($cache_content)) {
-            $cache_content = array();
-        }
-
-        return $cache_content;
+        return ($_SESSION['folders'][$folder] ? (array) $_SESSION['folders'][$folder] : array());
     }
 
     /* --------------------------------
