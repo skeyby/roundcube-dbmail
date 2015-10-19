@@ -9,9 +9,13 @@
  * 1. drop rcube_dbmail.php to '../program/lib/Roundcube'
  * 2. add the following lines to roundcube/config/config.inc.php
  *    $config['storage_driver'] = 'dbmail';
- *    $config['dbmail_dsn'] = 'mysql://user:pass@host/db'; # dsn connection string
- *    $config['dbmail_hash'] = 'sha1'; # hashing method to use, must coincide with dbmail.conf - sha1, md5, sha256, sha512, whirlpool. sha1 is the default
- *    $config['dbmail_fixed_headername_cache'] = FALSE; # add new headernames (if not exists) in 'dbmail_headername' when saving messages
+ *    $config['dbmail_dsn'] = 'mysql://user:pass@host/db';  # dsn connection string
+ *    $config['dbmail_hash'] = 'sha1';                      # hashing method to use, must coincide with dbmail.conf - sha1, md5, sha256, sha512, whirlpool. sha1 is the default
+ *    $config['dbmail_fixed_headername_cache'] = FALSE;     # add new headernames (if not exists) in 'dbmail_headername' when saving messages
+ * 3. (OPTIONALLY - TO ENABLE CONTENTS CACHEING) 
+ *    $config['dbmail_cache'] = 'db';                       # Generic cache switch
+ *    $config['messages_cache'] = TRUE;                     # Cache for messages. We don't use it
+ *    $config['dbmail_cache_ttl'] = '10d';                  # Cache default expire value
  * 
  * !!! IMPORTANT !!!
  * Use the official PEAR Mail_mimeDecode library, changing following line in 'composer.json'
@@ -30,15 +34,8 @@ class rcube_dbmail extends rcube_storage {
     private $debug = FALSE; ## Not really useful, we use it just to track internally the debug status 
 
     /**
-     * Instance of rcube_cache
-     *
-     * @var rcube_cache
+     * Default Settings 
      */
-    protected $cache;
-
-    /** Default Settings */
-    protected $caching = false;
-    protected $messages_caching = false;
     private $user_idnr = null;
     private $namespace = null;
     private $delimiter = null;
@@ -47,6 +44,10 @@ class rcube_dbmail extends rcube_storage {
     private $err_no = 0;
     private $err_str = '';
     private $response_code = null;
+
+    /**
+     * Searchable message headers
+     */
     private $searchable_headers = array(
         'x-priority',
         'subject',
@@ -56,6 +57,10 @@ class rcube_dbmail extends rcube_storage {
         'cc',
         'bcc'
     );
+
+    /**
+     * Supported IMAP capabilities
+     */
     private $imap_capabilities = array(
         'ACL',
         'ANNOTATE-EXPERIMENT-1',
@@ -117,8 +122,15 @@ class rcube_dbmail extends rcube_storage {
     );
 
     /**
+     * Cache configuration
+     */
+    protected $cache = null; // cache handler instance
+    protected $caching = null; // cache type (db /memcache/...)
+
+    /**
      *  Message status flags
      */
+
     const MESSAGE_STATUS_NEW = 0;
     const MESSAGE_STATUS_SEEN = 1;
     const MESSAGE_STATUS_DELETE = 2;
@@ -272,24 +284,24 @@ class rcube_dbmail extends rcube_storage {
      */
     public function expungeAll($mailbox_idnr) {
 
-        // set message flag
-        $query = " 
-                
-            UPDATE dbmail_messages, dbmail_mailboxes 
-               SET dbmail_messages.status = 2,
-                   dbmail_mailboxes.seq = dbmail_mailboxes.seq + 1
-             WHERE dbmail_messages.deleted_flag = 1
-               AND dbmail_mailboxes.mailbox_idnr = {$mailbox_idnr}
-               AND dbmail_messages.status < " . self::MESSAGE_STATUS_DELETE . "
-               AND dbmail_messages.mailbox_idnr = dbmail_mailboxes.mailbox_idnr
-               AND dbmail_mailboxes.owner_idnr = {$this->dbmail->escape($this->user_idnr)}
-               
-            ";
-
-        if (!$this->dbmail->query($query)) {
+        // ACLs check ('expunge' grant required )
+        $ACLs = $this->_get_acl(NULL, $mailbox_idnr);
+        if (!is_array($ACLs) || !in_array(self::ACl_EXPUNGE_FLAG, $ACLs)) {
+            // Unauthorized!
             return FALSE;
         }
-        return TRUE;
+
+        // set message flag
+        $expungeAllSQL = "UPDATE dbmail_mailboxes "
+                . "INNER JOIN dbmail_messages ON dbmail_messages.mailbox_idnr = dbmail_mailboxes.mailbox_idnr "
+                . "SET dbmail_messages.status = 2, "
+                . "dbmail_mailboxes.seq = dbmail_mailboxes.seq + 1"
+                . "WHERE bmail_messages.deleted_flag = 1 "
+                . "AND dbmail_mailboxes.mailbox_idnr = {$this->dbmail->escape($mailbox_idnr)} "
+                . "AND dbmail_messages.status < {$this->dbmail->escape(self::MESSAGE_STATUS_DELETE)} "
+                . "AND dbmail_mailboxes.owner_idnr = {$this->dbmail->escape($this->user_idnr)} ";
+
+        return ($this->dbmail->query($expungeAllSQL) ? TRUE : FALSE);
     }
 
     /**
@@ -478,8 +490,6 @@ class rcube_dbmail extends rcube_storage {
      */
     public function get_search_set() {
 
-        //return $this->search_set;
-
         if (empty($this->search_set)) {
             return null;
         }
@@ -605,32 +615,44 @@ class rcube_dbmail extends rcube_storage {
             $folder = $this->folder;
         }
 
-        // mailbox exists?
+        /**
+         *  mailbox exists?
+         */
         $mailbox_idnr = $this->get_mail_box_id($folder);
         if (!$mailbox_idnr) {
             return FALSE;
         }
 
-        // ACLs check ('lookup' and 'read' grants required )
+        /**
+         *  ACLs check ('lookup' and 'read' grants required )
+         */
         $ACLs = $this->_get_acl(NULL, $mailbox_idnr);
         if (!is_array($ACLs) || !in_array(self::ACl_LOOKUP_FLAG, $ACLs) || !in_array(self::ACl_READ_FLAG, $ACLs)) {
-            // Unauthorized!
+            /**
+             *  Unauthorized!
+             */
             return FALSE;
         }
 
-        // init search conditions
+        /*
+         *  init search conditions
+         */
         $search_conditions = NULL;
         if (is_array($this->search_set) && array_key_exists(0, $this->search_set)) {
             $search_conditions = $this->format_search_parameters($this->search_set[0]);
         }
 
-        // set additional join tables according to supplied search / filter conditions
+        /*
+         *  set additional join tables according to supplied search / filter conditions
+         */
         $additional_joins = "";
         if (is_object($search_conditions) && property_exists($search_conditions, 'additional_join_tables')) {
             $additional_joins .= " {$search_conditions->additional_join_tables}";
         }
 
-        // set where conditions according to supplied search / filter conditions
+        /*
+         *  set where conditions according to supplied search / filter conditions
+         */
         $where_conditions = " WHERE dbmail_messages.status < " . self::MESSAGE_STATUS_DELETE;
         if (is_object($search_conditions) && property_exists($search_conditions, 'formatted_filter_str') && strlen($search_conditions->formatted_filter_str) > 0) {
             $where_conditions .= " AND ( {$search_conditions->formatted_filter_str} )";
@@ -640,12 +662,16 @@ class rcube_dbmail extends rcube_storage {
             $where_conditions .= " AND ( {$search_conditions->formatted_search_str} )";
         }
 
-        // prepare base query
+        /*
+         *  prepare base query
+         */
         $query = " SELECT COUNT(DISTINCT dbmail_messages.message_idnr) AS items_count "
                 . " FROM dbmail_messages "
                 . " INNER JOIN dbmail_physmessage ON dbmail_messages.physmessage_id = dbmail_physmessage.id AND dbmail_messages.mailbox_idnr = {$this->dbmail->escape($mailbox_idnr)} ";
 
-        // flag unseen         
+        /*
+         *  flag unseen         
+         */
         if ($mode == 'UNSEEN') {
             $query .= " and seen_flag=0 ";
         }
@@ -658,12 +684,12 @@ class rcube_dbmail extends rcube_storage {
 
         $items_count = ($row['items_count'] > 0 ? $row['items_count'] : 0);
 
-        // cache messages count and latest message id
-        if ($mode == 'ALL') {
-            if ($status) {
-                $this->set_folder_stats($folder, 'cnt', $items_count);
-                $this->set_folder_stats($folder, 'maxuid', ($items_count ? $this->get_latest_message_idnr($folder) : 0));
-            }
+        /*
+         *  cache messages count and latest message id
+         */
+        if ($mode == 'ALL' && $status) {
+            $this->set_folder_stats($folder, 'cnt', $items_count);
+            $this->set_folder_stats($folder, 'maxuid', ($items_count ? $this->get_latest_message_idnr($folder) : 0));
         }
 
         return $items_count;
@@ -787,17 +813,6 @@ class rcube_dbmail extends rcube_storage {
      * @return  array    Indexed array with message header objects
      */
     public function list_messages($folder = null, $page = null, $sort_field = null, $sort_order = null, $slice = 0) {
-
-        if (strlen($folder) == 0) {
-            $folder = $this->folder;
-        }
-
-        // ACLs check ('lookup' and 'read' grants required )
-        $ACLs = $this->_get_acl($folder);
-        if (!is_array($ACLs) || !in_array(self::ACl_LOOKUP_FLAG, $ACLs) || !in_array(self::ACl_READ_FLAG, $ACLs)) {
-            // Unauthorized!
-            return FALSE;
-        }
 
         $search_conditions = NULL;
         if (is_array($this->search_set) && array_key_exists(0, $this->search_set)) {
@@ -1818,13 +1833,6 @@ class rcube_dbmail extends rcube_storage {
          */
         if (empty($uids) || $all_mode) {
 
-            // ACLs check ('deleted' and 'expunge' grants required )
-            $ACLs = $this->_get_acl(NULL, $mailbox_idnr);
-            if (!is_array($ACLs) || !in_array(self::ACl_DELETED_FLAG, $ACLs) || !in_array(self::ACl_EXPUNGE_FLAG, $ACLs)) {
-                // Unauthorized!
-                return FALSE;
-            }
-
             // Expunge all!
             $result = $this->expungeAll($mailbox_idnr); // da rinominare
 
@@ -2601,6 +2609,9 @@ class rcube_dbmail extends rcube_storage {
      * @param string $folder Folder name
      */
     public function folder_sync($folder) {
+
+
+
         // TO DO!!!!!
     }
 
@@ -3217,7 +3228,9 @@ class rcube_dbmail extends rcube_storage {
             $user_idnr = $this->user_idnr;
         }
 
-        // is owned mailbox?
+        /*
+         * Owned mailbox?
+         */
         $ownedMailboxSQL = " SELECT mailbox_idnr "
                 . " FROM dbmail_mailboxes "
                 . " WHERE owner_idnr = '{$this->dbmail->escape($user_idnr)}' "
@@ -3231,12 +3244,19 @@ class rcube_dbmail extends rcube_storage {
             $ownedMailbox = $this->dbmail->fetch_assoc($ownedMailboxResult);
 
             if (is_array($ownedMailbox) && array_key_exists('mailbox_idnr', $ownedMailbox) && strlen($ownedMailbox['mailbox_idnr'])) {
-                // Owned - return mailbox ID
+
+                /*
+                 * Owned mailbox found!
+                 * - return mailbox_idnr
+                 */
+
                 return $ownedMailbox['mailbox_idnr'];
             }
         }
 
-        // search for shared subscriptions
+        /*
+         *  Shared mailbox?
+         */
         $folderRealName = FALSE;
         $folderOwner = FALSE;
         $sharingsUserPath = $this->namespace['other'][0][0];
@@ -3274,7 +3294,7 @@ class rcube_dbmail extends rcube_storage {
         }
 
         /*
-         * Shared subscription found?
+         * Shared mailbox found?
          */
         if (!$folderRealName || !$folderOwner) {
             /*
@@ -3296,7 +3316,11 @@ class rcube_dbmail extends rcube_storage {
         $sharedMailbox = $this->dbmail->fetch_assoc($sharedMailboxResult);
 
         if (is_array($sharedMailbox) && array_key_exists('mailbox_idnr', $sharedMailbox) && strlen($sharedMailbox['mailbox_idnr'])) {
-            // Owned - return mailbox ID
+            /*
+             * Shared mailbox found!
+             * - return mailbox_idnr
+             */
+
             return $sharedMailbox['mailbox_idnr'];
         } else {
             return FALSE;
@@ -3629,20 +3653,33 @@ class rcube_dbmail extends rcube_storage {
      * when called from _list_messages).
      * 
      * @param int $message_idnr
-     * @param rcube_message_header 
+     * @param array $message_data 
+     * @param boolean $getBody whenever to retrieve body content too (instead of headers only)
+     * @param boolean $force whenever to skip reading from cached contents (if found)
+     * @return mixed
      */
-    private function retrieve_message($message_idnr, $message_data = FALSE, $getBody = TRUE) {
+    private function retrieve_message($message_idnr, $message_data = FALSE, $getBody = TRUE, $force = FALSE) {
 
-        $rcmh_cached = $this->get_cache("MSG_" . $message_idnr);
+        /*
+         * Set cache keys
+         */
+        $rcmh_cached_key = "MSG_" . $message_idnr;
+        $message_data_cached_key = "MSG_DATA" . $message_idnr;
+
+        /*
+         * Get cached contents
+         */
+        $rcmh_cached = $this->get_cache($rcmh_cached_key);
+        $message_data_cached = $this->get_cache($message_data_cached_key);
 
         /*
          * Checklist:
          *  - Is the object in cache a valid object?
          *  - Do we need (and do we have) the message body?
          */
-        if (is_object($rcmh_cached) && (
-                (!$getBody || isset($rcmh_cached->structure))
-                )) {
+        if (!$force &&
+                is_object($rcmh_cached) &&
+                (!$getBody || isset($rcmh_cached->structure))) {
 
             /*
              * If we're in the message list we certainly have an up-to-date message listing
@@ -3659,42 +3696,54 @@ class rcube_dbmail extends rcube_storage {
             return $rcmh_cached;
         }
 
+        /*
+         * Get message data (if not supplied)
+         */
 
-        // Are we receving the Message DATAS?
-        if ($message_data == FALSE) {
+        if (!$message_data && is_array($message_data_cached) && !$force) {
 
-            // No, so we retrieve the message record
-            $message_data = $this->get_message_record($message_idnr);
-            if (!$message_data) {
-                // Message not found!
+            /*
+             * Message_data not supplied but found a valid cached copy
+             */
+            $message_data = $message_data_cached;
+        } elseif (!$message_data) {
+            /*
+             * Message data not supplied and no cached copy found OR flag 'force reload' supplied
+             */
+            /*
+             * Get message properties
+             */
+            $message_record = $this->get_message_record($message_idnr);
+            if (!$message_record) {
+                // Not found!
                 return FALSE;
             }
-        }
 
-        // Do we have a cached version of the message?
-        /** TO DO * */
-        // Do we already have the message size?
-        if (!isset($message_data["message_size"])) {
-
-            // No, so we have to calculate it
-            $physmessage_metadata = $this->get_physmessage_record($message_data['physmessage_id']);
-            if (!$physmessage_metadata) {
-                return FALSE;     // Message not found, bail out
-            }
-            $message_data["message_size"] = $physmessage_metadata['messagesize'];
-        }
-
-        // Do we already have the folder name?
-        if (!isset($message_data['folder_record'])) {
-
-            // No, so we have to find it
-            $tmpFolder = $this->get_folder_record($message_data['mailbox_idnr']);
-
-            if (!$tmpFolder) {
-                return FALSE; // Folder not found, bail out
+            /*
+             * Get folder properties
+             */
+            $folder_record = $this->get_folder_record($message_record['mailbox_idnr']);
+            if (!$folder_record) {
+                // Not found!
+                return FALSE;
             }
 
-            $message_data["folder_record"]["name"] = $tmpFolder["name"];
+            /*
+             * Ok - prepare message data array
+             */
+            $message_data = array(
+                'message_idnr' => $message_record["message_idnr"],
+                'physmessage_id' => $message_record['physmessage_id'],
+                'message_size' => $message_record["messagesize"],
+                'seen_flag' => $message_record["seen_flag"],
+                'answered_flag' => $message_record["answered_flag"],
+                'deleted_flag' => $message_record["deleted_flag"],
+                'flagged_flag' => $message_record["flagged_flag"],
+                'folder_record' => array(
+                    'name' => $folder_record['name']
+                ),
+                'mailbox_idnr' => $message_record['mailbox_idnr']
+            );
         }
 
         // extract mime parts
@@ -3736,7 +3785,9 @@ class rcube_dbmail extends rcube_storage {
             $rcmh->structure = $this->get_structure($mime_decoded);
         }
 
-        $this->update_cache("MSG_" . $message_idnr, $rcmh);
+        // update cached contents
+        $this->update_cache($rcmh_cached_key, $rcmh);
+        $this->update_cache($message_data_cached_key, $message_data);
 
         return $rcmh;
     }
@@ -4156,27 +4207,50 @@ class rcube_dbmail extends rcube_storage {
             $folder = $this->folder;
         }
 
-        // set current mailbox folder ID
+        /*
+         *  get current mailbox folder ID
+         */
         $mailbox_idnr = $this->get_mail_box_id($folder);
 
-        // validate sort order (use default when not supplied)
+        /*
+         *  ACLs check ('lookup' and 'read' grants required )
+         */
+        $ACLs = $this->_get_acl(NULL, $mailbox_idnr);
+        if (!is_array($ACLs) || !in_array(self::ACl_LOOKUP_FLAG, $ACLs) || !in_array(self::ACl_READ_FLAG, $ACLs)) {
+            /*
+             *  Unauthorized!
+             */
+            return FALSE;
+        }
+
+        /*
+         *  validate sort order (use default when not supplied)
+         */
         $sort_order = (strtoupper($sort_order) == 'DESC' ? 'DESC' : 'ASC');
 
-        // set query offset / limit
+        /*
+         *  set query offset / limit
+         */
         $page = ((int) $page > 0 ? $page : $this->list_page);
         $query_offset = ($page > 0 ? (($page - 1) * $this->page_size) : 0);
         $query_limit = $this->page_size;
 
-        // set additional join tables according to supplied search / filter conditions
+        /*
+         *  set additional join tables according to supplied search / filter conditions
+         */
         $additional_joins = "";
         if (is_object($search_conditions) && property_exists($search_conditions, 'additional_join_tables')) {
             $additional_joins .= " {$search_conditions->additional_join_tables}";
         }
 
-        ## "Base Condition" is that the message should not be EXPUNGED (thus DELETED)
+        /*
+         * "Base Condition" is that the message should not be EXPUNGED (thus DELETED)
+         */
         $where_conditions = " WHERE dbmail_messages.status < " . self::MESSAGE_STATUS_DELETE;
 
-        // set where conditions according to supplied search / filter conditions
+        /*
+         *  set where conditions according to supplied search / filter conditions
+         */
         if (is_object($search_conditions) && property_exists($search_conditions, 'formatted_filter_str') && strlen($search_conditions->formatted_filter_str) > 0) {
             $where_conditions .= " AND ( {$search_conditions->formatted_filter_str} )";
         }
@@ -4185,12 +4259,16 @@ class rcube_dbmail extends rcube_storage {
             $where_conditions .= " AND ( {$search_conditions->formatted_search_str} )";
         }
 
-        ## Do we want deleted messages?
-        if ($this->options["skip_deleted"])
+        /*
+         * Do we want deleted messages?
+         */
+        if ($this->options["skip_deleted"]) {
             $where_conditions .= " AND dbmail_messages.deleted_flag = 0 ";
+        }
 
-
-        // set additional join tables depending by supplied sort conditions
+        /*
+         *  set additional join tablesaccording to supplied sort conditions
+         */
         switch ($sort_field) {
             case 'subject':
             case 'from':
@@ -4198,7 +4276,9 @@ class rcube_dbmail extends rcube_storage {
             case 'cc':
             case 'arrival':
             case 'date':
-                // 'subject' / 'from' and 'date' values are stored into 'dbmail_headervalue' table
+                /*
+                 *  'subject' / 'from' and 'date' values are stored into 'dbmail_headervalue' table
+                 */
                 $header_id = $this->get_header_id_by_header_name($sort_field);
 
                 $additional_joins .= " "
@@ -4208,16 +4288,22 @@ class rcube_dbmail extends rcube_storage {
                 $sort_condition = " ORDER BY sort_dbmail_headervalue.sortfield {$this->dbmail->escape($sort_order)} ";
                 break;
             case 'size':
-                // 'size' value is stored into 'dbmail_physmessage' table - no additional joins needed
+                /*
+                 *  'size' value is stored into 'dbmail_physmessage' table - no additional joins needed
+                 */
                 $sort_condition = " ORDER BY dbmail_physmessage.messagesize {$this->dbmail->escape($sort_order)} ";
                 break;
             default:
-                // natural sort 
+                /*
+                 *  natural sort 
+                 */
                 $sort_condition = " ORDER BY dbmail_messages.message_idnr {$this->dbmail->escape($sort_order)} ";
                 break;
         }
 
-        // prepare base query
+        /*
+         *  prepare base query
+         */
         $query = " SELECT DISTINCT dbmail_messages.message_idnr, dbmail_messages.physmessage_id, "
                 . " dbmail_physmessage.messagesize, dbmail_messages.seen_flag, "
                 . " dbmail_messages.answered_flag, dbmail_messages.deleted_flag, "
@@ -4240,17 +4326,23 @@ class rcube_dbmail extends rcube_storage {
 
         while ($msg = $this->dbmail->fetch_assoc($res)) {
 
-            $message_data["message_idnr"] = $msg["message_idnr"];
-            $message_data["physmessage_id"] = $msg['physmessage_id'];
-            $message_data["message_size"] = $msg["messagesize"];
-            $message_data["seen_flag"] = $msg["seen_flag"];
-            $message_data["answered_flag"] = $msg["answered_flag"];
-            $message_data["deleted_flag"] = $msg["deleted_flag"];
-            $message_data["flagged_flag"] = $msg["flagged_flag"];
-            $message_data["folder_record"]["name"] = $folder;
-            $message_data["mailbox_idnr"] = $mailbox_idnr;
 
-            $headers[$msg_index] = $this->retrieve_message($message_data["message_idnr"], $message_data, FALSE);
+            $message_data = array(
+                'message_idnr' => $msg["message_idnr"],
+                'physmessage_id' => $msg['physmessage_id'],
+                'message_size' => $msg["messagesize"],
+                'seen_flag' => $msg["seen_flag"],
+                'answered_flag' => $msg["answered_flag"],
+                'deleted_flag' => $msg["deleted_flag"],
+                'flagged_flag' => $msg["flagged_flag"],
+                'folder_record' => array(
+                    'name' => $folder
+                ),
+                'mailbox_idnr' => $mailbox_idnr
+            );
+
+            $headers[$msg_index] = $this->retrieve_message($msg["message_idnr"], $message_data, FALSE);
+
 
             ## Removing this to implement a full featured caching method
             # $toSess[$rcmh->uid] = $physmessage_id . ":" . $msg_index . ":" . $messagesize . ":" . $seen . ":" . $answered . ":" . $deleted . ":" . $flagged;
@@ -4266,7 +4358,6 @@ class rcube_dbmail extends rcube_storage {
             $headers = array_slice($headers, -$slice, $slice);
         }
 
-        //return $headers;
         return array_values($headers);
     }
 
@@ -4276,6 +4367,15 @@ class rcube_dbmail extends rcube_storage {
      * @return Mail_mimeDecode
      */
     private function decode_raw_message($raw_message, $decode_bodies = TRUE) {
+
+        /*
+         * Cached content exists?
+         */
+        $cache_key = "MIME_DECODED_MESSAGE_" . md5($raw_message);
+        $mime_decoded_message_cached = $this->get_cache($cache_key);
+        if (is_object($mime_decoded_message_cached)) {
+            return $mime_decoded_message_cached;
+        }
 
         $mime_decode = new Mail_mimeDecode($raw_message);
 
@@ -4293,8 +4393,15 @@ class rcube_dbmail extends rcube_storage {
          */
         $decoded = @$mime_decode->decode($decode_params);
 
-        // add mime_id attributes to '$decoded' array items (pass by reference)
+        /*
+         *  add mime_id attributes to '$decoded' array items (pass by reference)
+         */
         $mime_decode->getMimeNumbers($decoded);
+
+        /*
+         *  Store cached content
+         */
+        $this->update_cache($cache_key, $decoded);
 
         return $decoded;
     }
@@ -4305,6 +4412,15 @@ class rcube_dbmail extends rcube_storage {
      * @return stdClass
      */
     private function fetch_part_lists($physmessage_id) {
+
+        /*
+         * Cached content exists?
+         */
+        $cache_key = "RAW_MESSAGE_{$physmessage_id}";
+        $raw_message_cached = $this->get_cache($cache_key);
+        if (is_object($raw_message_cached)) {
+            return $raw_message_cached;
+        }
 
         $query = " SELECT dbmail_partlists.part_depth, dbmail_partlists.is_header, dbmail_mimeparts.data "
                 . " FROM dbmail_partlists "
@@ -4341,8 +4457,6 @@ class rcube_dbmail extends rcube_storage {
             $is_header = $mimePart['is_header'];
             $blob = $mimePart['data'];
 
-            //console("Depth ".$depth." [".$prevdepth."] - Header ".$is_header." [".$prev_header."]");
-
             if ($is_header) {
                 $prev_boundary = $got_boundary;
 
@@ -4371,7 +4485,6 @@ class rcube_dbmail extends rcube_storage {
                 unset($blist[$prevdepth - 1]);
                 $prevdepth--;
                 $finalized = true;
-                //console("È finito la parte, torniamo su");
             }
 
             if (($depth > 0) && (!empty($blist[$depth - 1]))) {
@@ -4390,42 +4503,39 @@ class rcube_dbmail extends rcube_storage {
                 $body .= "--" . $boundary . $newline;
             }
 
-
-
             /*
              * Let's handle what we have in the BLOB
              * 
              */
-
             if ($is_header && $depth == 0) {
                 $header .= $blob;
             } else {
                 $body .= $blob;
             }
 
-
             $body .= $newline;
 
             /*
              * Saving stuff for next iteration
              */
-
             $prevdepth = $depth;
             $prev_header = $is_header;
             $prev_is_message = $is_message;
             $index++;
         }
 
-
-
         if ($index > 2 && $boundary && !$finalized) {
             $body .= $newline . "--" . $boundary . "--" . $newline;
         }
 
-
         $response = new stdClass();
         $response->header = $header;
         $response->body = $body;
+
+        /*
+         *  Store cached content
+         */
+        $this->update_cache($cache_key, $response);
 
         return $response;
     }
@@ -4467,33 +4577,43 @@ class rcube_dbmail extends rcube_storage {
     }
 
     /**
-     * Return passed mime part
+     * Return mime part
      * @param stdClass $mime_decoded
      * @param string $mime_id
      * @return stdClass on success, False if not found
      */
     private function get_message_part_body($mime_decoded, $mime_id) {
 
-        $response = FALSE;
 
         if (property_exists($mime_decoded, 'mime_id') && $mime_decoded->mime_id == $mime_id) {
-            // found
-            $response = (property_exists($mime_decoded, 'body') ? $mime_decoded->body : FALSE);
-        } elseif (property_exists($mime_decoded, 'parts')) {
-            // fetch children
+            /*
+             *  found
+             */
+            return (property_exists($mime_decoded, 'body') ? $mime_decoded->body : FALSE);
+        }
+
+        /*
+         *  fetch children
+         */
+        if (property_exists($mime_decoded, 'parts') && is_array($mime_decoded->parts)) {
+
             foreach ($mime_decoded->parts as $part) {
 
-                $response = $this->get_message_part_body($part, $mime_id);
+                $body = $this->get_message_part_body($part, $mime_id);
 
-                if ($response) {
-                    // found
-                    break;
+                if ($body) {
+                    /*
+                     *  found
+                     */
+                    return $body;
                 }
             }
         }
 
-
-        return $response;
+        /*
+         * Nothing found
+         */
+        return FALSE;
     }
 
     /**
@@ -4578,8 +4698,10 @@ class rcube_dbmail extends rcube_storage {
 
         $hash = $this->hash_string($data);
 
-        ## Enable debug as you please by changing this to TRUE
-        if (FALSE) {
+        /*
+         *  Enable debug as you please by changing class property
+         */
+        if ($this->debug === TRUE) {
             console("Part Insert, physmessage id: " . $physmessage_id);
             console("Part Insert, is header:      " . $is_header);
             console("Part Insert, part key:       " . $part_key);
@@ -4588,7 +4710,9 @@ class rcube_dbmail extends rcube_storage {
             console("Part Insert, hash:           " . $hash);
         }
 
-        // blob exists?
+        /*
+         *  blob exists?
+         */
         $query = "SELECT id "
                 . " FROM dbmail_mimeparts "
                 . " WHERE hash = '{$this->dbmail->escape($hash)}' "
@@ -4598,7 +4722,9 @@ class rcube_dbmail extends rcube_storage {
 
         if ($this->dbmail->num_rows($result) == 0) {
 
-            // blob not found - insert new record in 'dbmail_mimeparts'
+            /*
+             *  blob not found - insert new record in 'dbmail_mimeparts'
+             */
             $query = "INSERT INTO dbmail_mimeparts "
                     . " ( "
                     . "    hash, "
@@ -4616,18 +4742,24 @@ class rcube_dbmail extends rcube_storage {
                 return FALSE;
             }
 
-            // retrieve inserted ID
+            /*
+             *  retrieve inserted ID
+             */
             $part_id = $this->dbmail->insert_id('dbmail_mimeparts');
             if (!$part_id) {
                 return FALSE;
             }
         } else {
-            // blob found - use current record ID
+            /*
+             *  blob found - use current record ID
+             */
             $row = $this->dbmail->fetch_assoc($result);
             $part_id = $row["id"];
         }
 
-        // register 'dbmail_partlists' to 'dbmail_mimeparts' relation
+        /*
+         *  register 'dbmail_partlists' to 'dbmail_mimeparts' relation
+         */
         $query = "INSERT INTO dbmail_partlists "
                 . " ( "
                 . "    physmessage_id, "
@@ -4651,7 +4783,7 @@ class rcube_dbmail extends rcube_storage {
     }
 
     /**
-     * Function to exract the RAW Headers of a message
+     * Function to extract the RAW Headers of a message
      * It simply read the message up to the first empty new line
      * Partially stolen from https://github.com/plancake/official-library-php-email-parser
      * 
@@ -4669,10 +4801,15 @@ class rcube_dbmail extends rcube_storage {
         $raw_header = '';
 
         foreach ($lines as $line) {
-            if (strlen(trim($line)) > 0)
-                $raw_header .= $line . "\n";
-            else
+
+            if (strlen(trim($line)) == 0) {
+                /*
+                 * Done!
+                 */
                 break;
+            }
+
+            $raw_header .= $line . "\n";
         }
 
         return $raw_header;
@@ -4688,24 +4825,31 @@ class rcube_dbmail extends rcube_storage {
      * @return boolean True on success, False on Failure
      */
     private function store_mime_object($physmessage_id, $mime_decoded, &$part_key, $part_depth, $part_order) {
-        /*
-          console("Store mime object");
-          console($mime_decoded);
-          console("Store mime object - part key:   " . $part_key);
-          console("Store mime object - part depth: " . $part_depth);
-          console("Store mime object - part order: " . $part_order);
-         */
-        // Top level headers (depth = 0) are taken directly from the message envelope
-        if ($part_depth > 0 && property_exists($mime_decoded, 'headers')) {
 
-            //Console("We have an header");
+        /*
+         *  Enable debug as you please by changing class property
+         */
+        if ($this->debug === TRUE) {
+            console("Store mime object");
+            console($mime_decoded);
+            console("Store mime object - part key:   " . $part_key);
+            console("Store mime object - part depth: " . $part_depth);
+            console("Store mime object - part order: " . $part_order);
+        }
+
+        /*
+         *  Top level headers (depth = 0) are taken directly from the message envelope
+         */
+        if ($part_depth > 0 && property_exists($mime_decoded, 'headers')) {
 
             $part_key++;
 
             $headers = '';
             foreach ($mime_decoded->headers as $header_name => $header_value) {
 
-                // Headers have a specific CASE-matching rule...
+                /*
+                 *  Headers have a specific CASE-matching rule...
+                 */
                 if (strtolower($header_name) == "content-type") {
                     $header_name = "Content-Type";
                 } elseif (strtolower($header_name) == "mime-version") {
@@ -4721,34 +4865,39 @@ class rcube_dbmail extends rcube_storage {
             $part_order++;
         }
 
-        // Do we have a body?
+        /*
+         *  Do we have a body?
+         */
         if (property_exists($mime_decoded, 'body')) {
             //Console("We have a message");
             if (!$this->_part_insert($physmessage_id, $mime_decoded->body, 0, $part_key, $part_depth, $part_order)) {
                 return FALSE;
             }
-        } else {
-            if ($part_depth == 0) {
-                //Console("Empty body for first level");
-                if (!$this->_part_insert($physmessage_id, "This is a multi-part message in MIME format.", 0, $part_key, $part_depth, $part_order)) {
-                    return FALSE;
-                }
+        } elseif ($part_depth == 0) {
+            //Console("Empty body for first level");
+            if (!$this->_part_insert($physmessage_id, "This is a multi-part message in MIME format.", 0, $part_key, $part_depth, $part_order)) {
+                return FALSE;
             }
         }
 
-        // Do we have additional parts?
-        if (property_exists($mime_decoded, 'parts')) {
+        /*
+         *  Do we have additional parts?
+         */
+        if (property_exists($mime_decoded, 'parts') && is_array($mime_decoded->parts)) {
             //Console("We have parts");
+
             $part_depth++;
             $part_order = 0;  // When depth rises, order goes zero
+
             foreach ($mime_decoded->parts as $eachPart) {
+
                 if (!$this->store_mime_object($physmessage_id, $eachPart, $part_key, $part_depth, $part_order)) {
                     return FALSE;
                 }
+
                 $part_order++;
             }
         }
-
 
         return TRUE;
     }
@@ -4818,34 +4967,41 @@ class rcube_dbmail extends rcube_storage {
      */
     private function save_searchable_header($physmessage_id, $header_name, $header_value) {
 
-        // add new header names to 'dbmail_headername' table?
+        /*
+         *  add new header names to 'dbmail_headername' table?
+         */
         $dbmail_fixed_headername_cache = $this->rcubeInstance->config->get('dbmail_fixed_headername_cache', null);
 
-        // retrieve $header_name_id (if exists)
+        /*
+         *  retrieve $header_name_id (if exists)
+         */
         $header_name_id = $this->get_header_id_by_header_name($header_name);
 
-        // retrieve $header_value_id (if exists)
+        /*
+         *  retrieve $header_value_id (if exists)
+         */
         $header_value_id = $this->get_header_value_id_by_header_value($header_value);
 
         if (!$dbmail_fixed_headername_cache && !$header_name_id) {
-            // header name doesn't exists and we don't want to add extra headers - OK
+            /*
+             *  header name doesn't exists and we don't want to add extra headers - OK
+             */
             return TRUE;
         }
 
         // fix missing header_name reference (if needed)
         if (!$header_name_id) {
-            // header name doesn't exists - create it
-            $query = "INSERT INTO dbmail_headername "
-                    . " ( "
-                    . "    headername "
-                    . " )"
+
+            /*
+             *  header name doesn't exists - create it
+             */
+            $headerNameSQL = "INSERT INTO dbmail_headername "
+                    . " ( headername )"
                     . " VALUES "
-                    . " ( "
-                    . "    '{$this->dbmail->escape($header_name)}' "
-                    . " )";
+                    . " ( '{$this->dbmail->escape($header_name)}' )";
 
 
-            if (!$this->dbmail->query($query)) {
+            if (!$this->dbmail->query($headerNameSQL)) {
                 return FALSE;
             }
 
@@ -4856,7 +5012,9 @@ class rcube_dbmail extends rcube_storage {
             }
         }
 
-        // fix missing header_value reference (if needed)
+        /*
+         *  fix missing header_value reference (if needed)
+         */
         if (!$header_value_id) {
 
             $date = DateTime::createFromFormat('Y-m-d H:i:s', $header_value);
@@ -4873,7 +5031,7 @@ class rcube_dbmail extends rcube_storage {
             }
 
             // header value doesn't exists - create it
-            $query = "INSERT INTO dbmail_headervalue "
+            $headerValueSQL = "INSERT INTO dbmail_headervalue "
                     . " ( "
                     . "    hash, "
                     . "    headervalue, "
@@ -4889,7 +5047,7 @@ class rcube_dbmail extends rcube_storage {
                     . " )";
 
 
-            if (!$this->dbmail->query($query)) {
+            if (!$this->dbmail->query($headerValueSQL)) {
                 return FALSE;
             }
 
@@ -4900,7 +5058,9 @@ class rcube_dbmail extends rcube_storage {
             }
         }
 
-        // add dbmail_headername to dbmail_headervalue relation
+        /*
+         *  add dbmail_headername to dbmail_headervalue relation
+         */
         $query = "INSERT INTO dbmail_header "
                 . " ( "
                 . "    physmessage_id, "
@@ -5020,9 +5180,11 @@ class rcube_dbmail extends rcube_storage {
      */
     private function save_mail_envelope_headers($physmessage_id, $envelope_headers) {
 
-        if (count($envelope_headers) == 0) {
-            // nothing supplied
-            return TRUE;
+        if (!$this->get_physmessage_record($physmessage_id) || strlen($envelope_headers) == 0) {
+            /*
+             * Invalid parameters suplied
+             */
+            return FALSE;
         }
 
         $query = "INSERT INTO dbmail_envelope "
@@ -5041,14 +5203,37 @@ class rcube_dbmail extends rcube_storage {
 
     /**
      * Stores folder statistic data in session
-     * @TODO: move to separate DB table (cache?)
      *
      * @param string $folder  Folder name
      * @param string $name    Data name
      * @param mixed  $data    Data value
      */
     protected function set_folder_stats($folder, $name, $data) {
-        $_SESSION['folders'][$folder][$name] = $data;
+
+        // $_SESSION['folders'][$folder][$name] = $data;
+
+        /*
+         * Cached content exists?
+         */
+        $cache_key = "Folder_stats_{$folder}";
+        $cache_content = $this->get_cache($cache_key);
+
+        /*
+         * Validate cached content
+         */
+        if (!$cache_content || !is_array($cache_content)) {
+            $cache_content = array();
+        }
+
+        /*
+         * Set / override folder propery
+         */
+        $cache_content[$name] = $data;
+
+        /*
+         * Store updated JSON encoded content
+         */
+        $this->update_cache($cache_key, $cache_content);
     }
 
     /**
@@ -5059,11 +5244,23 @@ class rcube_dbmail extends rcube_storage {
      * @return array Stats data
      */
     protected function get_folder_stats($folder) {
-        if ($_SESSION['folders'][$folder]) {
-            return (array) $_SESSION['folders'][$folder];
+
+        // return ($_SESSION['folders'][$folder] ? (array) $_SESSION['folders'][$folder] : array());
+
+        /*
+         * Cached content exists?
+         */
+        $cache_key = "Folder_stats_{$folder}";
+        $cache_content = $this->get_cache($cache_key);
+
+        /*
+         * Validate cached content
+         */
+        if (!$cache_content || !is_array($cache_content)) {
+            $cache_content = array();
         }
 
-        return array();
+        return $cache_content;
     }
 
     /* --------------------------------
@@ -5115,9 +5312,10 @@ class rcube_dbmail extends rcube_storage {
      * @return mixed
      */
     public function get_cache($key) {
-        if ($cache = $this->get_cache_engine()) {
-            return $cache->get($key);
-        }
+
+        $cache = $this->get_cache_engine();
+
+        return ($cache ? $cache->get($key) : NULL);
     }
 
     /**
@@ -5127,7 +5325,10 @@ class rcube_dbmail extends rcube_storage {
      * @param mixed  $data Data
      */
     public function update_cache($key, $data) {
-        if ($cache = $this->get_cache_engine()) {
+
+        $cache = $this->get_cache_engine();
+
+        if ($cache) {
             $cache->set($key, $data);
         }
     }
@@ -5140,7 +5341,10 @@ class rcube_dbmail extends rcube_storage {
      *                             with prefix specified in $key
      */
     public function clear_cache($key = null, $prefix_mode = false) {
-        if ($cache = $this->get_cache_engine()) {
+
+        $cache = $this->get_cache_engine();
+
+        if ($cache) {
             $cache->remove($key, $prefix_mode);
         }
     }
@@ -5148,12 +5352,13 @@ class rcube_dbmail extends rcube_storage {
     /**
      * Enable or disable messages caching
      *
-     * @param bool $enable Enable or disable caching
-     * @param int  
-     * @return 
+     * @param boolean $set  Flag
+     * @param int     $mode Cache mode
      */
     public function set_messages_caching($set, $mode = null) {
-        /* Not used as we rely on general cache */
+        /*
+         *  Not used as we rely on general cache 
+         */
     }
 
 }
