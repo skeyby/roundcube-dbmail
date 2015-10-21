@@ -4291,7 +4291,7 @@ class rcube_dbmail extends rcube_storage {
                 /*
                  *  natural sort - do nothing!
                  */
-                $sort_condition = "";
+                $sort_condition = " ORDER BY dbmail_messages.message_idnr {$this->dbmail->escape($sort_order)} ";
                 break;
         }
 
