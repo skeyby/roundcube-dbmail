@@ -29,7 +29,7 @@
  */
 class rcube_dbmail extends rcube_storage {
 
-    private $debug = TRUE; ## Not really useful, we use it just to track internally the debug status 
+    private $debug = FALSE; ## Not really useful, we use it just to track internally the debug status 
     private $user_idnr = null;
     private $namespace = null;
     private $delimiter = null;
@@ -129,6 +129,7 @@ class rcube_dbmail extends rcube_storage {
     /**
      *  ACLs mapping flags
      */
+    const ACL_CACHE_TTL = 300;
     const ACL_LOOKUP_FLAG = 'l';
     const ACL_READ_FLAG = 'r';
     const ACL_SEEN_FLAG = 's';
@@ -2913,6 +2914,21 @@ class rcube_dbmail extends rcube_storage {
     private function _get_acl($folderName = NULL, $folderId = NULL, $userId = NULL) {
 
         /**
+         * Cached entry exists?
+         */
+        $acl_session_key = md5("ACL_{$this->user_idnr}_{$folderName}_{$folderId}_{$userId}");
+
+        $cached_acl_expiration = (is_array($_SESSION) && array_key_exists($acl_session_key, $_SESSION) && array_key_exists('expiration', $_SESSION[$acl_session_key]) ? (int) $_SESSION[$acl_session_key]['expiration'] : 0);
+        $cached_acl_content = (is_array($_SESSION) && array_key_exists($acl_session_key, $_SESSION) && array_key_exists('grants', $_SESSION[$acl_session_key]) && is_array($_SESSION[$acl_session_key]['grants']) ? $_SESSION[$acl_session_key]['grants'] : array());
+
+        if ($cached_acl_expiration > time() && is_array($cached_acl_content)) {
+            /*
+             * Return cached ACLs
+             */
+            return $cached_acl_content;
+        }
+
+        /**
          * ACL map (ref. https://www.ietf.org/rfc/rfc4314.txt)
          * 
          * l - lookup (mailbox is visible to LIST/LSUB commands, SUBSCRIBE mailbox)
@@ -2994,7 +3010,7 @@ class rcube_dbmail extends rcube_storage {
             /*
              * Owned mailbox - return full ACLs list
              */
-            return array(
+            $grants = array(
                 self::ACL_LOOKUP_FLAG,
                 self::ACL_READ_FLAG,
                 self::ACL_SEEN_FLAG,
@@ -3007,6 +3023,16 @@ class rcube_dbmail extends rcube_storage {
                 self::ACL_EXPUNGE_FLAG,
                 self::ACL_ADMINISTER_FLAG
             );
+
+            /*
+             * Cache ACLs
+             */
+            $_SESSION[$acl_session_key] = array(
+                'expiration' => (time() + self::ACL_CACHE_TTL),
+                'grants' => $grants
+            );
+
+            return $grants;
         }
 
         /*
@@ -3073,6 +3099,14 @@ class rcube_dbmail extends rcube_storage {
         if ($sharedMailboxACLs['administer_flag'] == 1) {
             $ACLs[] = self::ACL_ADMINISTER_FLAG;
         }
+
+        /*
+         * Cache ACLs
+         */
+        $_SESSION[$acl_session_key] = array(
+            'expiration' => (time() + self::ACL_CACHE_TTL),
+            'grants' => $ACLs
+        );
 
         return $ACLs;
     }
