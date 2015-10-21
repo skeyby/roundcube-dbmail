@@ -283,8 +283,8 @@ class rcube_dbmail extends rcube_storage {
         $expungeAllSQL = "UPDATE dbmail_mailboxes "
                 . "INNER JOIN dbmail_messages ON dbmail_messages.mailbox_idnr = dbmail_mailboxes.mailbox_idnr "
                 . "SET dbmail_messages.status = 2, "
-                . "dbmail_mailboxes.seq = dbmail_mailboxes.seq + 1"
-                . "WHERE bmail_messages.deleted_flag = 1 "
+                . "dbmail_mailboxes.seq = dbmail_mailboxes.seq + 1 "
+                . "WHERE dbmail_messages.deleted_flag = 1 "
                 . "AND dbmail_mailboxes.mailbox_idnr = {$this->dbmail->escape($mailbox_idnr)} "
                 . "AND dbmail_messages.status < {$this->dbmail->escape(self::MESSAGE_STATUS_DELETE)} "
                 . "AND dbmail_mailboxes.owner_idnr = {$this->dbmail->escape($this->user_idnr)} ";
@@ -1562,24 +1562,6 @@ class rcube_dbmail extends rcube_storage {
             return FALSE;
         }
 
-        // validate ACLs for each message
-        foreach ($message_uids as $message_uid) {
-
-            // Retrieve message record
-            $message_metadata = $this->get_message_record($message_uid);
-            if (!$message_metadata) {
-                // not found
-                return FALSE;
-            }
-
-            // ACLs check ('read' grant required )
-            $ACLs = $this->_get_acl(NULL, $message_metadata['mailbox_idnr']);
-            if (!is_array($ACLs) || !in_array(self::ACL_READ_FLAG, $ACLs)) {
-                // Unauthorized!
-                return FALSE;
-            }
-        }
-
         // start transaction
         if (!$this->dbmail->startTransaction()) {
             return FALSE;
@@ -1587,6 +1569,22 @@ class rcube_dbmail extends rcube_storage {
 
         // loop message UIDs
         foreach ($message_uids as $message_uid) {
+
+            // Retrieve message record
+            $message_metadata = $this->get_message_record($message_uid);
+            if (!$message_metadata) {
+                // not found
+                $this->dbmail->rollbackTransaction();
+                return FALSE;
+            }
+
+            // ACLs check ('read' grant required )
+            $ACLs = $this->_get_acl(NULL, $message_metadata['mailbox_idnr']);
+            if (!is_array($ACLs) || !in_array(self::ACL_READ_FLAG, $ACLs)) {
+                // Unauthorized!
+                $this->dbmail->rollbackTransaction();
+                return FALSE;
+            }
 
             // change mailbox and update 'seq' flag
             $query = "UPDATE dbmail_messages "
@@ -1598,8 +1596,17 @@ class rcube_dbmail extends rcube_storage {
                 return FALSE;
             }
 
-            $this->increment_mailbox_seq($from_mailbox_idnr);
-            $this->increment_mailbox_seq($to_mailbox_idnr, $message_uid);
+            // increment 'SEQ' flag on src mailbox
+            if (!$this->increment_mailbox_seq($from_mailbox_idnr)) {
+                $this->dbmail->rollbackTransaction();
+                return FALSE;
+            }
+
+            // increment 'SEQ' flag on dest mailbox and moved message
+            if (!$this->increment_mailbox_seq($to_mailbox_idnr, $message_uid)) {
+                $this->dbmail->rollbackTransaction();
+                return FALSE;
+            }
         }
 
         // return status
@@ -1644,24 +1651,6 @@ class rcube_dbmail extends rcube_storage {
             return FALSE;
         }
 
-        // validate ACLs for each message
-        foreach ($message_uids as $message_uid) {
-
-            // Retrieve message record
-            $message_metadata = $this->get_message_record($message_uid);
-            if (!$message_metadata) {
-                // not found
-                return FALSE;
-            }
-
-            // ACLs check ('read' grant required )
-            $ACLs = $this->_get_acl(NULL, $message_metadata['mailbox_idnr']);
-            if (!is_array($ACLs) || !in_array(self::ACL_READ_FLAG, $ACLs)) {
-                // Unauthorized!
-                return FALSE;
-            }
-        }
-
         // start transaction
         if (!$this->dbmail->startTransaction()) {
             return FALSE;
@@ -1678,10 +1667,19 @@ class rcube_dbmail extends rcube_storage {
                 return FALSE;
             }
 
+            // ACLs check ('read' grant required )
+            $ACLs = $this->_get_acl(NULL, $message_metadata['mailbox_idnr']);
+            if (!is_array($ACLs) || !in_array(self::ACL_READ_FLAG, $ACLs)) {
+                // Unauthorized!
+                $this->dbmail->rollbackTransaction();
+                return FALSE;
+            }
+
             // flag 'deleted' validation
             if ($message_metadata['deleted_flag']) {
                 // don't copy deleted messages
-                continue;
+                $this->dbmail->rollbackTransaction();
+                return FALSE;
             }
 
             // Retrieve physmessage record
@@ -1731,11 +1729,18 @@ class rcube_dbmail extends rcube_storage {
                 $this->dbmail->rollbackTransaction();
                 return FALSE;
             }
-        }
 
-        if (!$this->increment_mailbox_seq($to_mailbox_idnr, $message_idnr)) {
-            $this->dbmail->rollbackTransaction();
-            return FALSE;
+            // increment 'SEQ' flag on '$to_mailbox' and '$message'
+            if (!$this->increment_mailbox_seq($to_mailbox_idnr, $message_idnr)) {
+                $this->dbmail->rollbackTransaction();
+                return FALSE;
+            }
+
+            // increment 'SEQ' flag on '$from_mailbox'
+            if (!$this->increment_mailbox_seq($message_metadata['mailbox_idnr'])) {
+                $this->dbmail->rollbackTransaction();
+                return FALSE;
+            }
         }
 
         // return status
@@ -1747,11 +1752,16 @@ class rcube_dbmail extends rcube_storage {
      *
      * @param mixed   $uids                 Message UIDs as array or comma-separated string, or '*'
      * @param string  $folder               Source folder
-     * @param boolean $skip_transaction     Skip transaction to use this method from within an already opened transaction
      *
      * @return boolean True on success, False on error
      */
-    public function delete_message($uids, $folder = NULL, $skip_transaction = FALSE) {
+    public function delete_message($uids, $folder = NULL) {
+
+        /*
+         * DON'T USE TRANSACTIONS WITHIN THIS METHOD!!!!!
+         * 
+         * TRANSACTIONS MUST BE STARTED INTO CALLER METHOD!!!
+         */
 
         if (strlen($folder) == 0) {
             $folder = $this->folder;
@@ -1770,7 +1780,6 @@ class rcube_dbmail extends rcube_storage {
             // Retrieve message record
             $message_metadata = $this->get_message_record($message_uid);
             if (!$message_metadata) {
-                // not found
                 return FALSE;
             }
 
@@ -1780,32 +1789,20 @@ class rcube_dbmail extends rcube_storage {
                 // Unauthorized!
                 return FALSE;
             }
-        }
 
-        // start transaction
-        if (!$skip_transaction && !$this->dbmail->startTransaction()) {
-            return FALSE;
-        }
-
-        foreach ($message_uids as $message_uid) {
-
+            // Set 'deleted' flag
             $query = "UPDATE dbmail_messages "
                     . " SET deleted_flag=1 "
-                    . "WHERE message_idnr = {$this->dbmail->escape($message_uid)}";
+                    . "WHERE message_idnr = {$this->dbmail->escape($message_uid)} ";
 
             if (!$this->dbmail->query($query)) {
-
-                if (!$skip_transaction) {
-                    $this->dbmail->rollbackTransaction();
-                }
                 return FALSE;
             }
 
-            $this->increment_mailbox_seq($mailbox_idnr, $message_uid);
-        }
-
-        if (!$skip_transaction && !$this->dbmail->endTransaction()) {
-            return FALSE;
+            // Update 'SEQ' flag
+            if (!$this->increment_mailbox_seq($message_metadata['mailbox_idnr'], $message_uid)) {
+                return FALSE;
+            }
         }
 
         return $this->expunge_message($uids, $folder, false);
@@ -1821,6 +1818,12 @@ class rcube_dbmail extends rcube_storage {
      * @return boolean True on success, False on error
      */
     public function expunge_message($uids, $folder = null, $clear_cache = true) {
+
+        /*
+         * DON'T USE TRANSACTIONS WITHIN THIS METHOD!!!!!
+         * 
+         * TRANSACTIONS MUST BE STARTED INTO CALLER METHOD!!!
+         */
 
         list($uids, $all_mode) = $this->parse_uids($uids);
 
@@ -1856,18 +1859,12 @@ class rcube_dbmail extends rcube_storage {
                 return TRUE;
             }
 
-            // start transaction
-            if (!$this->dbmail->startTransaction()) {
-                return FALSE;
-            }
-
             foreach ($message_uids as $message_uid) {
 
                 // Retrieve message record
                 $message_metadata = $this->get_message_record($message_uid);
                 if (!$message_metadata) {
                     // not found
-                    $this->dbmail->rollbackTransaction();
                     return FALSE;
                 }
 
@@ -1875,7 +1872,6 @@ class rcube_dbmail extends rcube_storage {
                 $ACLs = $this->_get_acl(NULL, $message_metadata['mailbox_idnr']);
                 if (!is_array($ACLs) || !in_array(self::ACL_DELETED_FLAG, $ACLs) || !in_array(self::ACL_EXPUNGE_FLAG, $ACLs)) {
                     // Unauthorized!
-                    $this->dbmail->rollbackTransaction();
                     return FALSE;
                 }
 
@@ -1883,7 +1879,6 @@ class rcube_dbmail extends rcube_storage {
                 $physmessage_metadata = $this->get_physmessage_record($message_metadata['physmessage_id']);
                 if (!$physmessage_metadata) {
                     // not found
-                    $this->dbmail->rollbackTransaction();
                     return FALSE;
                 }
 
@@ -1894,23 +1889,20 @@ class rcube_dbmail extends rcube_storage {
 
                 if (!$this->dbmail->query($query)) {
                     // rollbalk transaction
-                    $this->dbmail->rollbackTransaction();
                     return FALSE;
                 }
 
                 // decrement user quota
                 if (!$this->decrement_user_quota($this->user_idnr, $physmessage_metadata['messagesize'])) {
-                    $this->dbmail->rollbackTransaction();
                     return FALSE;
                 }
             }
 
             if (!$this->increment_mailbox_seq($mailbox_idnr)) {
-                $this->dbmail->rollbackTransaction();
                 return FALSE;
             }
 
-            return ($this->dbmail->endTransaction() ? TRUE : FALSE);
+            return TRUE;
         }
     }
 
@@ -4389,11 +4381,11 @@ class rcube_dbmail extends rcube_storage {
         /*
          * Cached content exists?
          */
-        $cache_key = "MIME_DECODED_MESSAGE_" . md5($raw_message);
-        $mime_decoded_message_cached = $this->get_cache($cache_key);
-        if (is_object($mime_decoded_message_cached)) {
-            return $mime_decoded_message_cached;
-        }
+//        $cache_key = "MIME_DECODED_MESSAGE_" . md5($raw_message);
+//        $mime_decoded_message_cached = $this->get_cache($cache_key);
+//        if (is_object($mime_decoded_message_cached)) {
+//            return $mime_decoded_message_cached;
+//        }
 
         $mime_decode = new Mail_mimeDecode($raw_message);
 
@@ -4419,7 +4411,7 @@ class rcube_dbmail extends rcube_storage {
         /*
          *  Store cached content
          */
-        $this->update_cache($cache_key, $decoded);
+//        $this->update_cache($cache_key, $decoded);
 
         return $decoded;
     }
@@ -4434,11 +4426,11 @@ class rcube_dbmail extends rcube_storage {
         /*
          * Cached content exists?
          */
-        $cache_key = "RAW_MESSAGE_{$physmessage_id}";
-        $raw_message_cached = $this->get_cache($cache_key);
-        if (is_object($raw_message_cached)) {
-            return $raw_message_cached;
-        }
+//        $cache_key = "RAW_MESSAGE_{$physmessage_id}";
+//        $raw_message_cached = $this->get_cache($cache_key);
+//        if (is_object($raw_message_cached)) {
+//            return $raw_message_cached;
+//        }
 
         $query = " SELECT dbmail_partlists.part_depth, dbmail_partlists.is_header, dbmail_mimeparts.data "
                 . " FROM dbmail_partlists "
@@ -4553,7 +4545,7 @@ class rcube_dbmail extends rcube_storage {
         /*
          *  Store cached content
          */
-        $this->update_cache($cache_key, $response);
+//        $this->update_cache($cache_key, $response);
 
         return $response;
     }
