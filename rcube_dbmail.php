@@ -14,7 +14,7 @@
  *    $config['dbmail_fixed_headername_cache'] = FALSE;     # add new headernames (if not exists) in 'dbmail_headername' when saving messages
  *    $config['dbmail_cache'] = 'db';                       # Generic cache switch. FALSE (to disable cache) / 'db' / 'memcache' / 'apc'
  *    $config['dbmail_cache_ttl'] = '10d';                  # Cache default expire value
- * 
+ *
  * !!! IMPORTANT !!!
  * Use the official PEAR Mail_mimeDecode library, changing following line in 'composer.json'
  * change  "pear/mail_mime-decode": ">=1.5.5",
@@ -29,11 +29,7 @@
  */
 class rcube_dbmail extends rcube_storage {
 
-    private $debug = FALSE; ## Not really useful, we use it just to track internally the debug status 
-
-    /**
-     * Default Settings 
-     */
+    private $debug = TRUE; ## Not really useful, we use it just to track internally the debug status 
     private $user_idnr = null;
     private $namespace = null;
     private $delimiter = null;
@@ -60,63 +56,56 @@ class rcube_dbmail extends rcube_storage {
      * Supported IMAP capabilities
      */
     private $imap_capabilities = array(
-        'ACL',
-        'ANNOTATE-EXPERIMENT-1',
-        'AUTH=',
-        'BINARY',
-        'CATENATE',
-        'CHILDREN',
-        'COMPRESS=DEFLATE',
-        'CONDSTORE',
-        'CONTEXT=SEARCH',
-        'CONTEXT=SORT',
-        'CONVERT',
-        'CREATE-SPECIAL-USE',
-        'ENABLE',
-        'ESEARCH',
-        'ESORT',
-        'FILTERS',
-        'I18NLEVEL=1',
-        'I18NLEVEL=2',
-        'ID',
-        'IDLE',
-        'IMAPSIEVE=',
-        'LANGUAGE',
-        'LIST-EXTENDED',
-        'LIST-STATUS',
-        'LITERAL+',
-        'LOGIN-REFERRALS',
-        'LOGINDISABLED',
-        'MAILBOX-REFERRALS',
-        'METADATA',
-        'METADATA-SERVER',
-        'MOVE',
-        'MULTIAPPEND',
-        'MULTISEARCH',
-        'NAMESPACE',
-        'NOTIFY',
-        'QRESYNC',
-        'QUOTA',
-        'RIGHTS=',
-        'SASL-IR',
-        'SEARCH=FUZZY',
-        'SEARCHRES',
-        'SORT',
-        'SORT=DISPLAY',
-        'SPECIAL-USE',
-        'STARTTLS',
-        ## 'THREAD', # Temporaly removed since the code doesn't support it
-        'UIDPLUS',
-        'UNSELECT',
-        'URLFETCH=BINARY',
-        'URL-PARTIAL',
-        'URLAUTH',
-        'UTF8=ACCEPT',
-        'UTF8=ALL',
-        'UTF8=APPEND',
-        'UTF8=ONLY',
-        'UTF8=USER',
-        'WITHIN'
+        'ACL' => TRUE,
+        'ANNOTATE-EXPERIMENT-1' => TRUE,
+        'AUTH' => TRUE,
+        'BINARY' => TRUE,
+        'CATENATE' => TRUE,
+        'CHILDREN' => TRUE,
+        'COMPRESS' => array('DEFLATE'),
+        'CONDSTORE' => TRUE,
+        'CONTEXT' => array('SEARCH', 'SORT'),
+        'CONVERT' => TRUE,
+        'CREATE-SPECIAL-USE' => TRUE,
+        'ENABLE' => TRUE,
+        'ESEARCH' => TRUE,
+        'ESORT' => TRUE,
+        'FILTERS' => TRUE,
+        'I18NLEVEL' => array('1', '2'),
+        'ID' => TRUE,
+        'IDLE' => TRUE,
+        'IMAPSIEVE' => TRUE,
+        'LANGUAGE' => TRUE,
+        'LIST-EXTENDED' => TRUE,
+        'LIST-STATUS' => TRUE,
+        'LITERAL+' => TRUE,
+        'LOGIN-REFERRALS' => TRUE,
+        'LOGINDISABLED' => TRUE,
+        'MAILBOX-REFERRALS' => TRUE,
+        'METADATA' => TRUE,
+        'METADATA-SERVER' => TRUE,
+        'MOVE' => TRUE,
+        'MULTIAPPEND' => TRUE,
+        'MULTISEARCH' => TRUE,
+        'NAMESPACE' => TRUE,
+        'NOTIFY' => TRUE,
+        'QRESYNC' => TRUE,
+        'QUOTA' => TRUE,
+        'RIGHTS' => TRUE,
+        'SASL-IR' => TRUE,
+        'SEARCH' => array('FUZZY'),
+        'SEARCHRES' => TRUE,
+        'SORT' => array('DISPLAY'),
+        'SPECIAL-USE' => TRUE,
+        'STARTTLS' => TRUE,
+        'THREAD' => array('ORDEREDSUBJECT'), # Temporaly removed since the code doesn't support it
+        'UIDPLUS' => TRUE,
+        'UNSELECT' => TRUE,
+        'URLFETCH' => array('BINARY'),
+        'URL-PARTIAL' => TRUE,
+        'URLAUTH' => TRUE,
+        'UTF8' => array('ACCEPT', 'ALL', 'APPEND', 'ONLY', 'USER'),
+        'WITHIN' => TRUE,
     );
 
     /**
@@ -514,11 +503,26 @@ class rcube_dbmail extends rcube_storage {
         $sess_key = "STORAGE_$cap";
 
         if (!isset($_SESSION[$sess_key])) {
-            if (!$this->check_connection()) {
-                return false;
-            }
 
-            $_SESSION[$sess_key] = in_array($cap, $this->imap_capabilities);
+            /*
+             * Supported capability?
+             */
+            if (!in_array($cap, $this->imap_capabilities)) {
+                /*
+                 * Not found!
+                 */
+                $_SESSION[$sess_key] = FALSE;
+            } elseif (is_array($this->imap_capabilities[$cap]) && count($this->imap_capabilities[$cap]) > 0) {
+                /*
+                 * Key / value pairs found: set supported capability types
+                 */
+                $_SESSION[$sess_key] = $this->imap_capabilities[$cap];
+            } else {
+                /*
+                 * Set capability as 'supported'
+                 */
+                $_SESSION[$sess_key] = TRUE;
+            }
         }
 
         return $_SESSION[$sess_key];
@@ -536,11 +540,21 @@ class rcube_dbmail extends rcube_storage {
 
         $this->threading = false;
 
-        if ($enable && ($caps = $this->get_capability('THREAD'))) {
-            $methods = array_intersect(array('REFS', 'REFERENCES', 'ORDEREDSUBJECT'), $caps);
-
-            $this->threading = array_shift($methods);
+        if (!$enable) {
+            return $this->threading;
         }
+
+        $caps = $this->get_capability('THREAD');
+        if (!$caps || !is_array($caps)) {
+            return $this->threading;
+        }
+
+        $methods = array_intersect(array('REFS', 'REFERENCES', 'ORDEREDSUBJECT'), $caps);
+        if (!is_array($methods) || count($methods) == 0) {
+            return $this->threading;
+        }
+
+        $this->threading = array_shift($methods);
 
         return $this->threading;
     }
@@ -4188,12 +4202,12 @@ class rcube_dbmail extends rcube_storage {
         }
 
         /*
-         *  get current mailbox folder ID
+         * Get current mailbox folder ID
          */
         $mailbox_idnr = $this->get_mail_box_id($folder);
 
         /*
-         *  ACLs check ('lookup' and 'read' grants required )
+         * ACLs check ('lookup' and 'read' grants required )
          */
         $ACLs = $this->_get_acl(NULL, $mailbox_idnr);
         if (!is_array($ACLs) || !in_array(self::ACL_LOOKUP_FLAG, $ACLs) || !in_array(self::ACL_READ_FLAG, $ACLs)) {
@@ -4204,19 +4218,19 @@ class rcube_dbmail extends rcube_storage {
         }
 
         /*
-         *  validate sort order (use default when not supplied)
+         * Validate sort order (use default when not supplied)
          */
         $sort_order = (strtoupper($sort_order) == 'DESC' ? 'DESC' : 'ASC');
 
         /*
-         *  set query offset / limit
+         * Set query offset / limit
          */
         $page = ((int) $page > 0 ? $page : $this->list_page);
         $query_offset = ($page > 0 ? (($page - 1) * $this->page_size) : 0);
         $query_limit = $this->page_size;
 
         /*
-         *  set additional join tables according to supplied search / filter conditions
+         * Set additional join tables according to supplied search conditions
          */
         $additional_joins = "";
         if (is_object($search_conditions) && property_exists($search_conditions, 'additional_join_tables')) {
@@ -4229,7 +4243,7 @@ class rcube_dbmail extends rcube_storage {
         $where_conditions = " WHERE dbmail_messages.status < " . self::MESSAGE_STATUS_DELETE;
 
         /*
-         *  set where conditions according to supplied search / filter conditions
+         * Set where conditions according to supplied search / filter conditions
          */
         if (is_object($search_conditions) && property_exists($search_conditions, 'formatted_filter_str') && strlen($search_conditions->formatted_filter_str) > 0) {
             $where_conditions .= " AND ( {$search_conditions->formatted_filter_str} )";
@@ -4247,7 +4261,7 @@ class rcube_dbmail extends rcube_storage {
         }
 
         /*
-         *  set additional join tablesaccording to supplied sort conditions
+         *  Set 'order by' clause
          */
         switch ($sort_field) {
             case 'subject':
@@ -4275,16 +4289,26 @@ class rcube_dbmail extends rcube_storage {
                 break;
             default:
                 /*
-                 *  natural sort 
+                 *  natural sort - do nothing!
                  */
-                $sort_condition = " ORDER BY dbmail_messages.message_idnr {$this->dbmail->escape($sort_order)} ";
+                $sort_condition = "";
                 break;
         }
 
         /*
-         *  prepare base query
+         * Set 'limit' clause 
          */
-        $query = " SELECT DISTINCT dbmail_messages.message_idnr, dbmail_messages.physmessage_id, "
+        $limit_condition = " LIMIT {$this->dbmail->escape($query_offset)}, {$this->dbmail->escape($query_limit)} ";
+
+        /*
+         * When no additional joins needed, avoid 'DISTINCT' clause
+         */
+        $distinct_clause = (strlen($additional_joins) > 0 ? 'DISTINCT' : '');
+
+        /*
+         *  Prepare base query
+         */
+        $query = " SELECT $distinct_clause dbmail_messages.message_idnr, dbmail_messages.physmessage_id, "
                 . " dbmail_physmessage.messagesize, dbmail_messages.seen_flag, "
                 . " dbmail_messages.answered_flag, dbmail_messages.deleted_flag, "
                 . " dbmail_messages.flagged_flag "
@@ -4294,18 +4318,13 @@ class rcube_dbmail extends rcube_storage {
         $query .= " {$additional_joins} ";
         $query .= " {$where_conditions} ";
         $query .= " {$sort_condition} ";
-        $query .= " LIMIT {$this->dbmail->escape($query_offset)}, {$this->dbmail->escape($query_limit)} ";
+        $query .= " {$limit_condition} ";
 
         $res = $this->dbmail->query($query);
 
         $headers = array();
         $msg_index = $query_offset++;
-
-        ## Removing this to implement a full featured caching method
-        # $toSess = array();
-
         while ($msg = $this->dbmail->fetch_assoc($res)) {
-
 
             $message_data = array(
                 'message_idnr' => $msg["message_idnr"],
@@ -4323,16 +4342,8 @@ class rcube_dbmail extends rcube_storage {
 
             $headers[$msg_index] = $this->retrieve_message($msg["message_idnr"], $message_data, FALSE);
 
-
-            ## Removing this to implement a full featured caching method
-            # $toSess[$rcmh->uid] = $physmessage_id . ":" . $msg_index . ":" . $messagesize . ":" . $seen . ":" . $answered . ":" . $deleted . ":" . $flagged;
-
             $msg_index++;
         }
-
-        ## Removing this to implement a full featured caching method
-        # $_SESSION['dbmail_header'] = $toSess;
-
 
         if ($slice) {
             $headers = array_slice($headers, -$slice, $slice);
@@ -5301,6 +5312,42 @@ class rcube_dbmail extends rcube_storage {
         /*
          *  Not used as we rely on general cache 
          */
+    }
+
+    /* --------------------------------
+     * Helper methods
+     * --------------------------------
+     * 
+     */
+
+    private function multidimensionalObjsArraySort($key, $order) {
+
+        if (strtoupper($order) == 'ASC') {
+
+            return function ($a, $b) use ($key) {
+                return strnatcmp($a->$key, $b->$key);
+            };
+        } else {
+
+            return function ($b, $a) use ($key) {
+                return strnatcmp($a->$key, $b->$key);
+            };
+        }
+    }
+
+    private function multidimensionalArraySort($key, $order) {
+
+        if (strtoupper($order) == 'ASC') {
+
+            return function ($a, $b) use ($key) {
+                return strnatcmp($a[$key], $b[$key]);
+            };
+        } else {
+
+            return function ($b, $a) use ($key) {
+                return strnatcmp($a[$key], $b[$key]);
+            };
+        }
     }
 
 }
