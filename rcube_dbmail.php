@@ -98,7 +98,7 @@ class rcube_dbmail extends rcube_storage {
         'SORT' => array('DISPLAY'),
         'SPECIAL-USE' => TRUE,
         'STARTTLS' => TRUE,
-        'THREAD' => array('ORDEREDSUBJECT'), # Temporaly removed since the code doesn't support it
+        // 'THREAD' => array('ORDEREDSUBJECT'), # Temporaly removed since the code doesn't support it
         'UIDPLUS' => TRUE,
         'UNSELECT' => TRUE,
         'URLFETCH' => array('BINARY'),
@@ -1091,13 +1091,6 @@ class rcube_dbmail extends rcube_storage {
      */
     public function get_message_part($uid, $part = 1, $o_part = null, $print = null, $fp = null, $skip_charset_conv = false) {
 
-        // Retreive base message entry
-        $message_record = $this->get_message_record($uid);
-        if (!$message_record) {
-            // Not found!
-            return FALSE;
-        }
-
         // Retrieve message record
         $message_metadata = $this->get_message_record($uid);
         if (!$message_metadata) {
@@ -1113,7 +1106,7 @@ class rcube_dbmail extends rcube_storage {
         }
 
         // Get mime content
-        $mime = $this->fetch_part_lists($message_record['physmessage_id']);
+        $mime = $this->fetch_part_lists($message_metadata['physmessage_id']);
 
         // Decode raw message
         $mime_decoded = $this->decode_raw_message($mime->header . $mime->body);
