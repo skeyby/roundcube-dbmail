@@ -14,6 +14,7 @@
  *    $config['dbmail_fixed_headername_cache'] = FALSE;     # add new headernames (if not exists) in 'dbmail_headername' when saving messages
  *    $config['dbmail_cache'] = 'db';                       # Generic cache switch. FALSE (to disable cache) / 'db' / 'memcache' / 'apc'
  *    $config['dbmail_cache_ttl'] = '10d';                  # Cache default expire value
+ *    $config['dbmail_sql_debug'] = FALSE;                  # log executed queries to 'logs/sql'?
  *
  * !!! IMPORTANT !!!
  * Use the official PEAR Mail_mimeDecode library, changing following line in 'composer.json'
@@ -42,6 +43,7 @@ class rcube_dbmail extends rcube_storage {
     /**
      * Searchable message headers
      */
+    private $headers_lookup = array();
     private $searchable_headers = array(
         'x-priority',
         'subject',
@@ -146,6 +148,11 @@ class rcube_dbmail extends rcube_storage {
      *  Public userId
      */
     const PUBLIC_FOLDER_USER = '__public__';
+
+    /**
+     * Temporary items time to live (seconds)
+     */
+    const TEMP_TTL = 300;
 
     public function __construct() {
 
@@ -501,32 +508,26 @@ class rcube_dbmail extends rcube_storage {
     public function get_capability($cap) {
 
         $cap = strtoupper($cap);
-        $sess_key = "STORAGE_$cap";
 
-        if (!isset($_SESSION[$sess_key])) {
-
+        /*
+         * Supported capability?
+         */
+        if (!in_array($cap, $this->imap_capabilities)) {
             /*
-             * Supported capability?
+             * Not found!
              */
-            if (!in_array($cap, $this->imap_capabilities)) {
-                /*
-                 * Not found!
-                 */
-                $_SESSION[$sess_key] = FALSE;
-            } elseif (is_array($this->imap_capabilities[$cap]) && count($this->imap_capabilities[$cap]) > 0) {
-                /*
-                 * Key / value pairs found: set supported capability types
-                 */
-                $_SESSION[$sess_key] = $this->imap_capabilities[$cap];
-            } else {
-                /*
-                 * Set capability as 'supported'
-                 */
-                $_SESSION[$sess_key] = TRUE;
-            }
+            return FALSE;
+        } elseif (is_array($this->imap_capabilities[$cap]) && count($this->imap_capabilities[$cap]) > 0) {
+            /*
+             * Key / value pairs found: return supported capability properties
+             */
+            return $this->imap_capabilities[$cap];
+        } else {
+            /*
+             * Supported
+             */
+            return TRUE;
         }
-
-        return $_SESSION[$sess_key];
     }
 
     /**
@@ -660,45 +661,69 @@ class rcube_dbmail extends rcube_storage {
          */
         $additional_joins = "";
         if (is_object($search_conditions) && property_exists($search_conditions, 'additional_join_tables')) {
-            $additional_joins .= " {$search_conditions->additional_join_tables}";
+            $additional_joins .= " INNER JOIN dbmail_physmessage ON dbmail_messages.physmessage_id = dbmail_physmessage.id ";
+            $additional_joins .= " {$search_conditions->additional_join_tables} ";
         }
 
         /*
-         *  set where conditions according to supplied search / filter conditions
+         * Set base 'where' conditions
          */
-        $where_conditions = " WHERE dbmail_messages.status < " . self::MESSAGE_STATUS_DELETE;
+        $where_conditions = " WHERE dbmail_messages.mailbox_idnr = {$this->dbmail->escape($mailbox_idnr)} "
+                . " AND dbmail_messages.status < " . self::MESSAGE_STATUS_DELETE;
+
+        /*
+         *  add 'where' conditions according to supplied search / filter conditions
+         */
         if (is_object($search_conditions) && property_exists($search_conditions, 'formatted_filter_str') && strlen($search_conditions->formatted_filter_str) > 0) {
-            $where_conditions .= " AND ( {$search_conditions->formatted_filter_str} )";
+            $where_conditions .= " AND ( {$search_conditions->formatted_filter_str} ) ";
         }
 
         if (is_object($search_conditions) && property_exists($search_conditions, 'formatted_search_str') && strlen($search_conditions->formatted_search_str) > 0) {
-            $where_conditions .= " AND ( {$search_conditions->formatted_search_str} )";
+            $where_conditions .= " AND ( {$search_conditions->formatted_search_str} ) ";
         }
 
-        /*
-         *  prepare base query
-         */
-        $query = " SELECT COUNT(DISTINCT dbmail_messages.message_idnr) AS items_count "
-                . " FROM dbmail_messages "
-                . " INNER JOIN dbmail_physmessage ON dbmail_messages.physmessage_id = dbmail_physmessage.id AND dbmail_messages.mailbox_idnr = {$this->dbmail->escape($mailbox_idnr)} ";
-
-        /*
-         *  flag unseen         
-         */
         if ($mode == 'UNSEEN') {
-            $query .= " and seen_flag=0 ";
+            $where_conditions .= " AND dbmail_messages.seen_flag = 0 ";
         }
 
+        /*
+         * Set 'distinct' clause when additional joins are needed
+         */
+        $distinct_clause = (strlen($additional_joins) > 0 ? 'DISTINCT' : '');
+
+        /*
+         * Prepare base query
+         */
+        $query = " SELECT COUNT({$distinct_clause} dbmail_messages.message_idnr) AS items_count "
+                . " FROM dbmail_messages ";
         $query .= " {$additional_joins} ";
         $query .= " {$where_conditions} ";
 
+        /*
+         * Before executing query (and if '$force' == FALSE), try to get a temporary content (if exists)
+         */
+        $temp_key = "METHOD_COUNT_" . md5($query);
+
+        $temp_contents = $this->get_temp_value($temp_key);
+        if (!$force && $temp_contents) {
+            return $temp_contents;
+        }
+
+        /*
+         * Execute query
+         */
         $res = $this->dbmail->query($query);
         $row = $this->dbmail->fetch_assoc($res);
 
         $items_count = ($row['items_count'] > 0 ? $row['items_count'] : 0);
 
         /*
-         *  cache messages count and latest message id
+         * Save query output within temporary contents
+         */
+        $this->set_temp_value($temp_key, $items_count);
+
+        /*
+         *  Cache messages count and latest message id
          */
         if ($mode == 'ALL' && $status) {
             $this->set_folder_stats($folder, 'cnt', $items_count);
@@ -733,34 +758,12 @@ class rcube_dbmail extends rcube_storage {
             return FALSE;
         }
 
-        $search_conditions = NULL;
-        if (is_array($this->search_set) && array_key_exists(0, $this->search_set)) {
-            $search_conditions = $this->format_search_parameters($this->search_set[0]);
-        }
-
-        // set additional join tables according to supplied search / filter conditions
-        $additional_joins = "";
-        if (is_object($search_conditions) && property_exists($search_conditions, 'additional_join_tables')) {
-            $additional_joins .= " {$search_conditions->additional_join_tables}";
-        }
-
-        // set where conditions according to supplied search / filter conditions
-        $where_conditions = " WHERE dbmail_messages.status < " . self::MESSAGE_STATUS_DELETE;
-        if (is_object($search_conditions) && property_exists($search_conditions, 'formatted_filter_str') && strlen($search_conditions->formatted_filter_str) > 0) {
-            $where_conditions .= " AND ( {$search_conditions->formatted_filter_str} )";
-        }
-
-        if (is_object($search_conditions) && property_exists($search_conditions, 'formatted_search_str') && strlen($search_conditions->formatted_search_str) > 0) {
-            $where_conditions .= " AND ( {$search_conditions->formatted_search_str} )";
-        }
-
         // prepare base query
         $query = " SELECT MAX(message_idnr) AS latest_message_idnr "
                 . " FROM dbmail_messages "
-                . " INNER JOIN dbmail_physmessage ON dbmail_messages.physmessage_id = dbmail_physmessage.id AND dbmail_messages.mailbox_idnr = {$this->dbmail->escape($mailbox_idnr)} ";
+                . " WHERE dbmail_messages.mailbox_idnr = {$this->dbmail->escape($mailbox_idnr)} "
+                . " AND dbmail_messages.status < " . self::MESSAGE_STATUS_DELETE;
 
-        $query .= " {$additional_joins} ";
-        $query .= " {$where_conditions} ";
 
         $res = $this->dbmail->query($query);
         $row = $this->dbmail->fetch_assoc($res);
@@ -785,30 +788,37 @@ class rcube_dbmail extends rcube_storage {
 
         $mailbox_idnr = $this->get_mail_box_id($folder);
 
-        $result = array();
+        if (!is_array($uids) || count($uids) == 0) {
+            /*
+             * Empry set supplied!
+             */
+            return array();
+        }
 
-        foreach ($uids as $uid) {
+        foreach ($uids as &$uid) {
+            /*
+             *  escape arguments
+             */
+            $uid = $this->dbmail->escape($uid);
+        }
 
-            // exec single query foreach messageId in $uids
-            $query = " SELECT seen_flag, answered_flag, deleted_flag, flagged_flag, recent_flag, draft_flag "
-                    . " FROM dbmail_messages "
-                    . " WHERE message_idnr = {$this->dbmail->escape($uid)} "
-                    . " AND mailbox_idnr = {$this->dbmail->escape($mailbox_idnr)} ";
+        $query = " SELECT seen_flag, answered_flag, deleted_flag, flagged_flag, recent_flag, draft_flag "
+                . " FROM dbmail_messages "
+                . " WHERE message_idnr in (" . implode(',', $uids) . ") "
+                . " AND mailbox_idnr = {$this->dbmail->escape($mailbox_idnr)} ";
 
-            $res = $this->dbmail->query($query);
-            $row = $this->dbmail->fetch_assoc($res);
+        $res = $this->dbmail->query($query);
 
-            if (!empty($row)) {
+        while ($row = $this->dbmail->fetch_assoc($res)) {
 
-                $result[$uid] = array(
-                    'seen' => ($row['seen_flag'] ? TRUE : FALSE),
-                    'answered' => ($row['answered_flag'] ? TRUE : FALSE),
-                    'deleted' => ($row['deleted_flag'] ? TRUE : FALSE),
-                    'flagged' => ($row['flagged_flag'] ? TRUE : FALSE),
-                    'recent' => ($row['recent_flag'] ? TRUE : FALSE),
-                    'draft' => ($row['draft_flag'] ? TRUE : FALSE)
-                );
-            }
+            $result[$uid] = array(
+                'seen' => ($row['seen_flag'] ? TRUE : FALSE),
+                'answered' => ($row['answered_flag'] ? TRUE : FALSE),
+                'deleted' => ($row['deleted_flag'] ? TRUE : FALSE),
+                'flagged' => ($row['flagged_flag'] ? TRUE : FALSE),
+                'recent' => ($row['recent_flag'] ? TRUE : FALSE),
+                'draft' => ($row['draft_flag'] ? TRUE : FALSE)
+            );
         }
 
         return $result;
@@ -2247,7 +2257,6 @@ class rcube_dbmail extends rcube_storage {
                         . " set name = '{$this->dbmail->escape($new_sub_folder_name)}' "
                         . " WHERE mailbox_idnr = {$this->dbmail->escape($sub_folder_idnr)} ";
 
-                // rename sub-folder
                 if (!$this->dbmail->query($query)) {
                     // rollbalk transaction
                     $this->dbmail->rollbackTransaction();
@@ -2256,6 +2265,12 @@ class rcube_dbmail extends rcube_storage {
 
                 // increment folder 'seq' flag
                 if (!$this->increment_mailbox_seq($sub_folder_idnr)) {
+                    $this->dbmail->rollbackTransaction();
+                    return FALSE;
+                }
+
+                // unset temporary stored mailbox_id (if present)
+                if (!$this->unset_temp_value("MBOX_ID_{$sub_folder_name}_{$this->user_idnr}")) {
                     $this->dbmail->rollbackTransaction();
                     return FALSE;
                 }
@@ -2275,6 +2290,12 @@ class rcube_dbmail extends rcube_storage {
 
         // increment folder 'seq' flag
         if (!$this->increment_mailbox_seq($mailbox_idnr)) {
+            $this->dbmail->rollbackTransaction();
+            return FALSE;
+        }
+
+        // unset temporary stored mailbox_id (if present)
+        if (!$this->unset_temp_value("MBOX_ID_{$folder}_{$this->user_idnr}")) {
             $this->dbmail->rollbackTransaction();
             return FALSE;
         }
@@ -2367,6 +2388,12 @@ class rcube_dbmail extends rcube_storage {
 
             if (!$this->dbmail->query($query)) {
                 // rollbalk transaction
+                $this->dbmail->rollbackTransaction();
+                return FALSE;
+            }
+
+            // unset temporary stored mailbox_id (if present)
+            if (!$this->unset_temp_value("MBOX_ID_{$folder_name}_{$this->user_idnr}")) {
                 $this->dbmail->rollbackTransaction();
                 return FALSE;
             }
@@ -2908,16 +2935,14 @@ class rcube_dbmail extends rcube_storage {
         /**
          * Cached entry exists?
          */
-        $acl_session_key = md5("ACL_{$this->user_idnr}_{$folderName}_{$folderId}_{$userId}");
+        $temp_value_key = md5("ACL_{$this->user_idnr}_{$folderName}_{$folderId}_{$userId}");
 
-        $cached_acl_expiration = (is_array($_SESSION) && array_key_exists($acl_session_key, $_SESSION) && array_key_exists('expiration', $_SESSION[$acl_session_key]) ? (int) $_SESSION[$acl_session_key]['expiration'] : 0);
-        $cached_acl_content = (is_array($_SESSION) && array_key_exists($acl_session_key, $_SESSION) && array_key_exists('grants', $_SESSION[$acl_session_key]) && is_array($_SESSION[$acl_session_key]['grants']) ? $_SESSION[$acl_session_key]['grants'] : array());
-
-        if ($cached_acl_expiration > time() && is_array($cached_acl_content)) {
+        $temp_content = $this->get_temp_value($temp_value_key);
+        if ($temp_content && is_array($temp_content)) {
             /*
              * Return cached ACLs
              */
-            return $cached_acl_content;
+            return $temp_content;
         }
 
         /**
@@ -3019,10 +3044,7 @@ class rcube_dbmail extends rcube_storage {
             /*
              * Cache ACLs
              */
-            $_SESSION[$acl_session_key] = array(
-                'expiration' => (time() + self::ACL_CACHE_TTL),
-                'grants' => $grants
-            );
+            $this->set_temp_value($temp_value_key, $grants);
 
             return $grants;
         }
@@ -3095,10 +3117,7 @@ class rcube_dbmail extends rcube_storage {
         /*
          * Cache ACLs
          */
-        $_SESSION[$acl_session_key] = array(
-            'expiration' => (time() + self::ACL_CACHE_TTL),
-            'grants' => $ACLs
-        );
+        $this->set_temp_value($temp_value_key, $grants);
 
         return $ACLs;
     }
@@ -3207,6 +3226,10 @@ class rcube_dbmail extends rcube_storage {
 
         $this->dbmail = new rcube_db($dsn_dbMail);
 
+        $debug_queries = ($this->rcubeInstance->config->get('dbmail_sql_debug') ? TRUE : FALSE);
+
+        $this->dbmail->set_debug($debug_queries);
+
         $this->dbmail->db_connect('r');
 
         return(!is_null($this->dbmail->is_error()) ? FALSE : TRUE);
@@ -3260,6 +3283,17 @@ class rcube_dbmail extends rcube_storage {
         }
 
         /*
+         * Temporary content exists?
+         * 
+         * TEMPORARY CONTENT MUST BE DELETED WHEN DELETING / RENAMING / ... FOLDERS!!!!!
+         */
+        $temp_key = "MBOX_ID_{$folder}_{$user_idnr}";
+        $temp_mail_box_id = $this->get_temp_value($temp_key);
+        if ($temp_mail_box_id) {
+            return $temp_mail_box_id;
+        }
+
+        /*
          * Owned mailbox?
          */
         $ownedMailboxSQL = " SELECT mailbox_idnr "
@@ -3280,6 +3314,8 @@ class rcube_dbmail extends rcube_storage {
                  * Owned mailbox found!
                  * - return mailbox_idnr
                  */
+
+                $this->set_temp_value($temp_key, $ownedMailbox['mailbox_idnr']);
 
                 return $ownedMailbox['mailbox_idnr'];
             }
@@ -3351,6 +3387,8 @@ class rcube_dbmail extends rcube_storage {
              * Shared mailbox found!
              * - return mailbox_idnr
              */
+
+            $this->set_temp_value($temp_key, $sharedMailbox['mailbox_idnr']);
 
             return $sharedMailbox['mailbox_idnr'];
         } else {
@@ -3633,23 +3671,48 @@ class rcube_dbmail extends rcube_storage {
      */
     private function get_header_id_by_header_name($header_name) {
 
-        ## Roundcube doesn't use some standard RFC names, so we have
-        ## to normalize this.
-        ## Roundcube "arrival" corresponds to "received", but - WARNING -
-        ## received isn't a required header, so the results are pretty strange
-        ## maybe assuming arrival == data could be a better solution
-        if ($header_name == "arrival")
+        /**
+          Roundcube doesn't use some standard RFC names, so we have
+          to normalize this.
+          Roundcube "arrival" corresponds to "received", but - WARNING -
+          received isn't a required header, so the results are pretty strange
+          maybe assuming arrival == data could be a better solution
+         */
+        if ($header_name == "arrival") {
             $header_name = "received";
+        }
 
-        $query = "SELECT id "
-                . "FROM dbmail_headername "
-                . "WHERE headername = '{$this->dbmail->escape($header_name)}' "
-                . "LIMIT 1";
+        /**
+         * Search for cached items
+         */
+        $cache_key = "HEADERS_LOOKUP";
+        $headers = $this->get_cache($cache_key);
+        if (is_array($headers) && array_key_exists($header_name, $headers)) {
+            return $headers[$header_name];
+        }
 
-        $res = $this->dbmail->query($query);
-        $row = $this->dbmail->fetch_assoc($res);
+        /**
+         * Not found - cache 'dbmail_headername' lookup table
+         */
+        $sql = "SELECT * "
+                . "FROM dbmail_headername ";
 
-        return (is_array($row) && array_key_exists('id', $row) ? $row['id'] : FALSE);
+        $res = $this->dbmail->query($sql);
+
+        $headers = array();
+        while ($row = $this->dbmail->fetch_assoc($res)) {
+            $headers[$row['headername']] = $row['id'];
+        }
+
+        /**
+         * Cache headers lookup
+         */
+        $this->update_cache($cache_key, $headers);
+
+        /**
+         * return result
+         */
+        return (is_array($headers) && array_key_exists($header_name, $headers) ? $headers[$header_name] : FALSE);
     }
 
     /**
@@ -5339,6 +5402,12 @@ class rcube_dbmail extends rcube_storage {
      * 
      */
 
+    /**
+     * 'usort' callback method to sort objects list on supplied property name
+     * @param string $key property name
+     * @param string $order (ASC / DESC)
+     * @example usort($myObjectsList, $this->multidimensionalObjsArraySort('propertyName', 'ASC'));
+     */
     private function multidimensionalObjsArraySort($key, $order) {
 
         if (strtoupper($order) == 'ASC') {
@@ -5354,6 +5423,12 @@ class rcube_dbmail extends rcube_storage {
         }
     }
 
+    /**
+     * 'usort' callback method to sort multidimensional array on supplied key
+     * @param string $key array key
+     * @param string $order (ASC / DESC)
+     * @example usort($myArray, $this->multidimensionalArraySort('keyName', 'ASC'));
+     */
     private function multidimensionalArraySort($key, $order) {
 
         if (strtoupper($order) == 'ASC') {
@@ -5367,6 +5442,59 @@ class rcube_dbmail extends rcube_storage {
                 return strnatcmp($a[$key], $b[$key]);
             };
         }
+    }
+
+    /**
+     * Temporary save supplied content
+     * @param string $key
+     * @param mixed $content
+     * @param int $expiresAt
+     */
+    private function set_temp_value($key = '', $content = '', $expiresAt = NULL) {
+
+        if (strlen($expiresAt) == 0) {
+            /*
+             * Set default TTL if none supplied
+             */
+            $expiresAt = time() + self::TEMP_TTL;
+        }
+
+        /*
+         * We store TMP data within current session; feel free to move to another 'storage' target if you prefer (memcached, apc, ...)
+         */
+        $_SESSION[$key] = array(
+            'expiresAt' => $expiresAt,
+            'content' => $content
+        );
+
+        return TRUE;
+    }
+
+    /**
+     * Retrieve stored temporary content
+     * @param string $key
+     * @return mixed value on success, FALSE on failure (key not found / expired)
+     */
+    private function get_temp_value($key = '') {
+
+        if (is_array($_SESSION) && array_key_exists($key, $_SESSION) && array_key_exists('expiresAt', $_SESSION[$key]) && time() <= $_SESSION[$key]['expiresAt']) {
+            return $_SESSION[$key]['content'];
+        } else {
+            return FALSE;
+        }
+    }
+
+    /**
+     * Delete stored temporary content
+     * @param string $key
+     */
+    private function unset_temp_value($key = '') {
+
+        if (is_array($_SESSION) && array_key_exists($key, $_SESSION)) {
+            unset($_SESSION[$key]);
+        }
+
+        return TRUE;
     }
 
 }
