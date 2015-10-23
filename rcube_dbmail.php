@@ -719,8 +719,10 @@ class rcube_dbmail extends rcube_storage {
 
         /*
          * Save query output within temporary contents
+         * 
+         * DON'T USE A LONG TTL HERE!!!!!!!!!!
          */
-        $this->set_temp_value($temp_key, $items_count);
+        $this->set_temp_value($temp_key, $items_count, 30);
 
         /*
          *  Cache messages count and latest message id
@@ -5448,16 +5450,24 @@ class rcube_dbmail extends rcube_storage {
      * Temporary save supplied content
      * @param string $key
      * @param mixed $content
-     * @param int $expiresAt
+     * @param int $TTL
+     * @return boolean
      */
-    private function set_temp_value($key = '', $content = '', $expiresAt = NULL) {
+    private function set_temp_value($key = '', $content = '', $TTL = NULL) {
 
-        if (strlen($expiresAt) == 0) {
+
+        if (strlen($TTL) == 0) {
             /*
              * Set default TTL if none supplied
              */
-            $expiresAt = time() + self::TEMP_TTL;
+            $TTL = self::TEMP_TTL;
         }
+
+        /*
+         * Set cache expire TS
+         */
+        $expiresAt = time() + $TTL;
+
 
         /*
          * We store TMP data within current session; feel free to move to another 'storage' target if you prefer (memcached, apc, ...)
@@ -5487,6 +5497,7 @@ class rcube_dbmail extends rcube_storage {
     /**
      * Delete stored temporary content
      * @param string $key
+     * @return boolean
      */
     private function unset_temp_value($key = '') {
 
