@@ -3448,8 +3448,9 @@ class rcube_dbmail extends rcube_storage {
     private function get_message_record($message_idnr) {
 
         $query = " SELECT * "
-                . " FROM dbmail_messages "
-                . " WHERE message_idnr = '{$this->dbmail->escape($message_idnr)}' ";
+                . " FROM dbmail_messages, dbmail_physmessage "
+		. " WHERE message_idnr = '{$this->dbmail->escape($message_idnr)}' "
+		. " AND dbmail_physmessage.id = dbmail_messages.physmessage_id";
 
         $res = $this->dbmail->query($query);
         if ($this->dbmail->num_rows($res) == 0) {
