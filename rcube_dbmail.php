@@ -790,24 +790,39 @@ class rcube_dbmail extends rcube_storage {
 
         $mailbox_idnr = $this->get_mail_box_id($folder);
 
-        if (!is_array($uids) || count($uids) == 0) {
+        /*
+         * Filter by:
+         * 1 - $mailbox_idnr
+         * 2 - $message_idnrs
+         * 3 - $mailbox_idnr + $message_idnrs
+         */
+        $filters = array();
+
+        if (strlen($mailbox_idnr) > 0) {
+            $filters[] = "mailbox_idnr = {$this->dbmail->escape($mailbox_idnr)}";
+        }
+
+        if (is_array($uids) && count($uids) > 0) {
+
+            foreach ($uids as &$uid) {
+                /*
+                 *  escape arguments
+                 */
+                $uid = $this->dbmail->escape($uid);
+            }
+            $filters[] = "message_idnr in (" . implode(',', $uids) . ")";
+        }
+
+        if (count($filters) == 0) {
             /*
-             * Empry set supplied!
+             * No filters supplied!
              */
             return array();
         }
 
-        foreach ($uids as &$uid) {
-            /*
-             *  escape arguments
-             */
-            $uid = $this->dbmail->escape($uid);
-        }
-
         $query = " SELECT seen_flag, answered_flag, deleted_flag, flagged_flag, recent_flag, draft_flag "
                 . " FROM dbmail_messages "
-                . " WHERE message_idnr in (" . implode(',', $uids) . ") "
-                . " AND mailbox_idnr = {$this->dbmail->escape($mailbox_idnr)} ";
+                . " WHERE " . implode(" AND ", $filters);
 
         $res = $this->dbmail->query($query);
 
