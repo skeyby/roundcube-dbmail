@@ -159,11 +159,6 @@ class rcube_dbmail extends rcube_storage {
         // get main roundcube instance
         $this->rcubeInstance = rcube::get_instance();
 
-        // set user_idnr (if found)
-        if (is_null($this->user_idnr) && strlen($_SESSION['user_idnr']) > 0) {
-            $this->user_idnr = $_SESSION['user_idnr'];
-        }
-
         // set namespaces
         if (is_null($this->namespace)) {
             $this->namespace = array(
@@ -198,6 +193,11 @@ class rcube_dbmail extends rcube_storage {
         // connect to dbmail database
         if (!$this->dbmail_connect()) {
             die("Error during connection to Dbmail database: " . $this->dbmail->is_error());
+        }
+
+        // set dbmail user_idnr (if empty)
+        if (strlen($this->user_idnr) == 0) {
+            $this->user_idnr = $this->get_dbmail_user_idnr($_SESSION['username']);
         }
     }
 
@@ -3253,6 +3253,27 @@ class rcube_dbmail extends rcube_storage {
     }
 
     /**
+     * Retrieve DB Mail $user_idnr from supplied $username (e-mail address)
+     */
+    protected function get_dbmail_user_idnr($username = '') {
+
+        $sql = "SELECT user_idnr "
+                . "FROM dbmail_users "
+                . "WHERE userid = '{$this->dbmail->escape($username)}' ";
+
+        $result = $this->dbmail->query($sql);
+
+        if ($this->dbmail->num_rows($result) != 1) {
+            // not found
+            return FALSE;
+        }
+
+        $user = $this->dbmail->fetch_assoc($result);
+
+        return $user['user_idnr'];
+    }
+
+    /**
      * Retrieve mailbox name
      * 
      * @param int $mailbox_idnr
@@ -3464,8 +3485,8 @@ class rcube_dbmail extends rcube_storage {
 
         $query = " SELECT * "
                 . " FROM dbmail_messages, dbmail_physmessage "
-		. " WHERE message_idnr = '{$this->dbmail->escape($message_idnr)}' "
-		. " AND dbmail_physmessage.id = dbmail_messages.physmessage_id";
+                . " WHERE message_idnr = '{$this->dbmail->escape($message_idnr)}' "
+                . " AND dbmail_physmessage.id = dbmail_messages.physmessage_id";
 
         $res = $this->dbmail->query($query);
         if ($this->dbmail->num_rows($res) == 0) {
