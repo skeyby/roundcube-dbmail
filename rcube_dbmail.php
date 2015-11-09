@@ -195,10 +195,12 @@ class rcube_dbmail extends rcube_storage {
             die("Error during connection to Dbmail database: " . $this->dbmail->is_error());
         }
 
-        // set dbmail user_idnr (if empty)
-        if (strlen($this->user_idnr) == 0) {
-            $this->user_idnr = $this->get_dbmail_user_idnr($_SESSION['username']);
+        // set dbmail user_idnr (retrieve it if empty)
+        if (!isset($_SESSION['user_idnr']) || !$_SESSION['user_idnr'] || strlen($_SESSION['user_idnr']) == 0) {
+            $_SESSION['user_idnr'] = $this->get_dbmail_user_idnr($_SESSION['username']);
         }
+
+        $this->user_idnr = $this->get_dbmail_user_idnr($_SESSION['username']);
     }
 
     /**
