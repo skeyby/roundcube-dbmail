@@ -1254,7 +1254,7 @@ class rcube_dbmail extends rcube_storage {
      * Set message flag to one or several messages
      *
      * @param mixed   $uids       Message UIDs as array or comma-separated string, or '*'
-     * @param string  $flag       Flag to set: UNDELETED, DELETED, SEEN, UNSEEN, FLAGGED, UNFLAGGED
+     * @param string  $flag       Flag to set: UNDELETED, DELETED, SEEN, UNSEEN, FLAGGED, UNFLAGGED, ANSWERED
      * @param string  $folder     Folder name
      * @param boolean $skip_cache True to skip message cache clean up
      *
@@ -1304,6 +1304,11 @@ class rcube_dbmail extends rcube_storage {
             case 'UNFLAGGED':
                 $flag_field = 'flagged_flag';
                 $flag_value = 0;
+                $required_ACL = self::ACL_WRITE_FLAG;
+                break;
+            case 'ANSWERED':
+                $flag_field = 'answered_flag';
+                $flag_value = 1;
                 $required_ACL = self::ACL_WRITE_FLAG;
                 break;
             default:
