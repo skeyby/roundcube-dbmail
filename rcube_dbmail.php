@@ -129,6 +129,11 @@ class rcube_dbmail extends rcube_storage {
     const MESSAGE_STATUS_ERROR = 6;
 
     /**
+     * Keyword tokens
+     */
+    const KEYWORD_FORWARDED = '$Forwarded';
+
+    /**
      *  ACLs mapping flags
      */
     const ACL_CACHE_TTL = 300;
@@ -1254,7 +1259,7 @@ class rcube_dbmail extends rcube_storage {
      * Set message flag to one or several messages
      *
      * @param mixed   $uids       Message UIDs as array or comma-separated string, or '*'
-     * @param string  $flag       Flag to set: UNDELETED, DELETED, SEEN, UNSEEN, FLAGGED, UNFLAGGED, ANSWERED
+     * @param string  $flag       Flag to set: UNDELETED, DELETED, SEEN, UNSEEN, FLAGGED, UNFLAGGED, ANSWERED, FORWARDED
      * @param string  $folder     Folder name
      * @param boolean $skip_cache True to skip message cache clean up
      *
@@ -1271,44 +1276,87 @@ class rcube_dbmail extends rcube_storage {
             return FALSE;
         }
 
+        // some flags (es. FORWARDED) must be stored within 'dbmail_keywords' table insted of 'dbmail_messages'
+        $is_keyword = FALSE;
+        $keyword_token = NULL;
+
         // validate target flag
         $flag_field = '';
         $flag_value = '';
+        $msg_flag_key = '';
+        $msg_flag_value = '';
         $required_ACL = '';
         switch ($flag) {
             case 'UNDELETED':
+                $is_keyword = FALSE;
+                $keyword_token = NULL;
                 $flag_field = 'deleted_flag';
                 $flag_value = 0;
+                $msg_flag_key = 'DELETED';
+                $msg_flag_value = 0;
                 $required_ACL = self::ACL_DELETED_FLAG;
                 break;
             case 'DELETED':
+                $is_keyword = FALSE;
+                $keyword_token = NULL;
                 $flag_field = 'deleted_flag';
                 $flag_value = 1;
+                $msg_flag_key = 'DELETED';
+                $msg_flag_value = 1;
                 $required_ACL = self::ACL_DELETED_FLAG;
                 break;
-            case 'SEEN':
-                $flag_field = 'seen_flag';
-                $flag_value = 1;
-                $required_ACL = self::ACL_SEEN_FLAG;
-                break;
             case 'UNSEEN':
+                $is_keyword = FALSE;
+                $keyword_token = NULL;
                 $flag_field = 'seen_flag';
                 $flag_value = 0;
+                $msg_flag_key = 'SEEN';
+                $msg_flag_value = 0;
                 $required_ACL = self::ACL_SEEN_FLAG;
                 break;
-            case 'FLAGGED':
-                $flag_field = 'flagged_flag';
+            case 'SEEN':
+                $is_keyword = FALSE;
+                $keyword_token = NULL;
+                $flag_field = 'seen_flag';
                 $flag_value = 1;
-                $required_ACL = self::ACL_WRITE_FLAG;
+                $msg_flag_key = 'SEEN';
+                $msg_flag_value = 1;
+                $required_ACL = self::ACL_SEEN_FLAG;
                 break;
             case 'UNFLAGGED':
+                $is_keyword = FALSE;
+                $keyword_token = NULL;
                 $flag_field = 'flagged_flag';
                 $flag_value = 0;
+                $msg_flag_key = 'FLAGGED';
+                $msg_flag_value = 0;
+                $required_ACL = self::ACL_WRITE_FLAG;
+                break;
+            case 'FLAGGED':
+                $is_keyword = FALSE;
+                $keyword_token = NULL;
+                $flag_field = 'flagged_flag';
+                $flag_value = 1;
+                $msg_flag_key = 'FLAGGED';
+                $msg_flag_value = 1;
                 $required_ACL = self::ACL_WRITE_FLAG;
                 break;
             case 'ANSWERED':
+                $is_keyword = FALSE;
+                $keyword_token = NULL;
                 $flag_field = 'answered_flag';
                 $flag_value = 1;
+                $msg_flag_key = 'ANSWERED';
+                $msg_flag_value = 1;
+                $required_ACL = self::ACL_WRITE_FLAG;
+                break;
+            case 'FORWARDED':
+                $is_keyword = TRUE;
+                $keyword_token = self::KEYWORD_FORWARDED;
+                $flag_field = NULL;
+                $flag_value = NULL;
+                $msg_flag_key = 'FORWARDED';
+                $msg_flag_value = 1;
                 $required_ACL = self::ACL_WRITE_FLAG;
                 break;
             default:
@@ -1341,13 +1389,39 @@ class rcube_dbmail extends rcube_storage {
             }
 
             // set message flag
-            $query = "UPDATE dbmail_messages "
-                    . "SET {$this->dbmail->escape($flag_field)} = {$this->dbmail->escape($flag_value)} "
-                    . "WHERE message_idnr = {$this->dbmail->escape($message_uid)} ";
+            if (!$is_keyword) {
 
-            if (!$this->dbmail->query($query)) {
-                $this->dbmail->rollbackTransaction();
-                return FALSE;
+                // update 'dbmail_messages' table
+                $query = "UPDATE dbmail_messages "
+                        . "SET {$this->dbmail->escape($flag_field)} = {$this->dbmail->escape($flag_value)} "
+                        . "WHERE message_idnr = {$this->dbmail->escape($message_uid)} ";
+
+                if (!$this->dbmail->query($query)) {
+                    $this->dbmail->rollbackTransaction();
+                    return FALSE;
+                }
+            } else {
+
+                // update 'dbmail_keywords' table
+                if (!$this->set_keyword($message_uid, $keyword_token)) {
+                    $this->dbmail->rollbackTransaction();
+                    return FALSE;
+                }
+            }
+
+            // update cached message flag (if needed)
+            $rcmh_cached_key = "MSG_" . $message_uid;
+            $rcmh_cached = $this->get_cache($rcmh_cached_key);
+
+            if (!$skip_cache &&
+                    is_object($rcmh_cached) &&
+                    property_exists($rcmh_cached, 'flags') &&
+                    is_array($rcmh_cached->flags)) {
+                // cached message found - update flags!
+                $rcmh_cached->flags[$msg_flag_key] = $msg_flag_value;
+
+                // update cached contents
+                $this->update_cache($rcmh_cached_key, $rcmh_cached);
             }
         }
 
@@ -3781,6 +3855,50 @@ class rcube_dbmail extends rcube_storage {
     }
 
     /**
+     * Keyword exists?  
+     *
+     * @param int  $message_idnr    message ID
+     * @param string  $keyword    keyword
+     *
+     * @return boolean TRUE if keyword exists, FALSE otherwise
+     */
+    private function get_keyword($message_idnr, $keyword) {
+
+        $query = "SELECT * "
+                . "FROM dbmail_keywords "
+                . "WHERE message_idnr = '{$this->dbmail->escape($message_idnr)}'"
+                . "AND keyword = '{$this->dbmail->escape($keyword)}'";
+
+        $res = $this->dbmail->query($query);
+
+        return ($this->dbmail->num_rows($res) == 0 ? FALSE : TRUE);
+    }
+
+    /**
+     * Set Keyword
+     *
+     * @param int  $message_idnr    message ID
+     * @param string  $keyword    keyword
+     * @return boolean TRUE on success, FALSE otherwise
+     */
+    private function set_keyword($message_idnr, $keyword) {
+
+        // keyword already exists?
+        if ($this->get_keyword($message_idnr, $keyword)) {
+            // OK - found!
+            return TRUE;
+        }
+
+        // insert keyword
+        $query = "INSERT INTO dbmail_keywords "
+                . "(message_idnr, keyword) "
+                . "VALUES "
+                . "('{$this->dbmail->escape($message_idnr)}', '{$this->dbmail->escape($keyword)}') ";
+
+        return ($this->dbmail->query($query) ? TRUE : FALSE);
+    }
+
+    /**
      * Function to retrieve a message.
      * In it's basic for this function, given a message_idnr, retrieves the full data set
      * and cache the resultset into roundcube fast-lookup cache.
@@ -3823,6 +3941,7 @@ class rcube_dbmail extends rcube_storage {
                 $rcmh_cached->flags["ANSWERED"] = ($message_data['answered_flag'] == 1 ? TRUE : FALSE);
                 $rcmh_cached->flags["DELETED"] = ($message_data['deleted_flag'] == 1 ? TRUE : FALSE);
                 $rcmh_cached->flags["FLAGGED"] = ($message_data['flagged_flag'] == 1 ? TRUE : FALSE);
+                $rcmh_cached->flags["FORWARDED"] = $this->get_keyword($message_idnr, self::KEYWORD_FORWARDED);
             }
 
             return $rcmh_cached;
