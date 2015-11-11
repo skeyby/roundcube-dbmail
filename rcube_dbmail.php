@@ -4704,12 +4704,12 @@ class rcube_dbmail extends rcube_storage {
             $got_boundary = false;
 
             $matches = array();
-            //$pattern = '~^content-type:\s+.*;(\r?\n\s.*)*\s+boundary="?([a-z0-9\'()+_,-./:=\?]*)~mi';
-            $pattern = '~^content-type:\s+.*;(\r?\n\s.*)*\s+boundary="?([a-z0-9\'()+_,-./:=\?\\s]*)~mi';
+            //$pattern = '~^content-type:\s+.*;(\r?\n\s.*)*\s+boundary="?([a-z0-9\'()+_,-./:=\?\\s]*)"?~mi';
+            $pattern = '~^content-type:\s+.*;(\r?\n\s.*)*\s+boundary="?([a-z0-9\'()+_,-./:=\?\s]*)"?~mi';
             if ($is_header && preg_match($pattern, $blob, $matches)) {
                 list(,, $boundary) = $matches;
                 $got_boundary = true;
-                $blist[$depth] = $boundary;
+                $blist[$depth] = trim($boundary);
             }
 
             /*
