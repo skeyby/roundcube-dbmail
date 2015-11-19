@@ -4792,6 +4792,21 @@ class rcube_dbmail extends rcube_storage {
         $encoding = $this->get_header_value($imploded_headers, 'Content-Transfer-Encoding');
         $filename = $this->get_header_value($imploded_headers, 'filename');
 
+        /*
+         * Many mail user agents also send messages with the file name in the name parameter of 
+         * the content-type header instead of the filename parameter of the content-disposition 
+         * header. T
+         * his practice is discouraged – the file name should be specified either through just 
+         * the filename parameter, or through both the filename and the name parameters
+         * 
+         * https://en.wikipedia.org/wiki/MIME#Content-Disposition
+         * 
+         * https://tools.ietf.org/html/rfc2183
+         */
+        if (strlen($filename) == 0) {
+            $filename = $this->get_header_value($imploded_headers, 'name');
+        }
+
         $rcube_message_part = new rcube_message_part();
         $rcube_message_part->mime_id = (strlen($structure->mime_id) > 0 ? $structure->mime_id : 0);
         $rcube_message_part->ctype_primary = (strlen($structure->ctype_primary) > 0 ? $structure->ctype_primary : '');
