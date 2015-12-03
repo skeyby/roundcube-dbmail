@@ -230,11 +230,11 @@ class rcube_dbmail extends rcube_storage {
         $valid_user = FALSE;
 
         // validate supplied login details
-        $query = "SELECT user_idnr, passwd, encryption_type "
+        $user_sql = "SELECT user_idnr, passwd, encryption_type "
                 . " FROM dbmail_users "
                 . " WHERE userid = '{$this->dbmail->escape($user)}' ";
 
-        $res = $this->dbmail->query($query);
+        $res = $this->dbmail->query($user_sql);
 
         if ($this->dbmail->num_rows($res) == 0) {
             // usename not found
@@ -264,13 +264,26 @@ class rcube_dbmail extends rcube_storage {
                 break;
         }
 
-        // valid user? store user identity within session data
-        if ($valid_user) {
-            $this->user_idnr = $row['user_idnr'];
-            $_SESSION['user_idnr'] = $this->user_idnr;
+        // authenticated user?
+        if (!$valid_user) {
+            return FALSE;
         }
 
-        return $valid_user;
+        // Update last login
+        $current_datetime = new DateTime();
+        $last_login_sql = "UPDATE dbmail_users "
+                . "SET last_login = '{$this->dbmail->escape($current_datetime->format('Y-m-d H:i:s'))}' "
+                . "WHERE user_idnr = '{$this->dbmail->escape($row['user_idnr'])}' ";
+
+        if (!$this->dbmail->query($last_login_sql)) {
+            return FALSE;
+        }
+
+        // OK - store user identity within session data
+        $this->user_idnr = $row['user_idnr'];
+        $_SESSION['user_idnr'] = $this->user_idnr;
+
+        return TRUE;
     }
 
     /**
@@ -3721,65 +3734,274 @@ class rcube_dbmail extends rcube_storage {
      * @param string $header headers list
      * @param string $token header name 
      * 
-     * @return string header value on success, False on error
+     * @return string header value on success, False when not found
      */
     protected function get_header_value($header, $token) {
 
-        ## Remove any trailing WSP
+        /*
+         * Init header value container
+         */
+        $header_value = FALSE;
+
+        /*
+         * Init language / content encoding containers
+         */
+        $content_encoding = FALSE;
+        $content_language = FALSE;
+
+        /*
+         * Remove any trailing WSP
+         */
         $header = trim($header);
 
-        ## Unfolding according to RFC 2822, chapter 2.2.3
+        /*
+         * Unfolding according to RFC 2822, chapter 2.2.3
+         */
         $header = str_replace("\r\n ", " ", $header);
         $header = str_replace("\r\n\t", " ", $header);
-        ## Unfolding with compatibility with some non-standard mailers
-        ## that only add \n instead of \r\n
+
+        /*
+         * Unfolding with compatibility with some non-standard mailers
+         * that only add \n instead of \r\n
+         */
         $header = str_replace("\n ", " ", $header);
         $header = str_replace("\n\t", " ", $header);
 
-        // explode header by new line sign
+        /*
+         *  explode headers on new line
+         */
         $rows = explode("\n", $header);
 
-        // standard delimiter is ':', match '=' only for following properties
+        /*
+         *  standard delimiter is ':', match '=' only for following properties
+         */
         $delimiter = $this->get_header_delimiter($token);
 
-        // convert token to uppercase to perform case-insensitive search
+        /*
+         *  convert token to uppercase to perform case-insensitive search
+         */
         $ci_token = strtoupper($token);
 
-        // loop each row searching for supplied token
+        /*
+         * loop each row searching for supplied token
+         */
         foreach ($rows as &$row) {
 
-            // trim whitespaces
+            /*
+             *  trim whitespaces
+             */
             $row = trim($row);
 
-            // split row by ';' to manage multiple key=>value pairs within same row
+            /*
+             *  split row by ';' to manage multiple key=>value pairs within same row
+             */
             $items = explode(';', $row);
 
             foreach ($items as &$item) {
 
                 $item = trim($item);
 
-                if ($ci_token == substr(strtoupper($item), 0, strlen($ci_token))) {
+                /*
+                 * Parameter Value Continuations
+                 * 
+                 * Long MIME media type or disposition parameter values do not interact
+                 * well with header line wrapping conventions.  In particular, proper
+                 * header line wrapping depends on there being places where linear
+                 * whitespace (LWSP) is allowed, which may or may not be present in a
+                 * parameter value, and even if present may not be recognizable as such
+                 * since specific knowledge of parameter value syntax may not be
+                 * available to the agent doing the line wrapping. The result is that
+                 * long parameter values may end up getting truncated or otherwise
+                 * damaged by incorrect line wrapping implementations.
+                 * 
+                 * A mechanism is therefore needed to break up parameter values into
+                 * smaller units that are amenable to line wrapping. Any such mechanism
+                 * MUST be compatible with existing MIME processors. This means that
+                 * 
+                 * (1)   the mechanism MUST NOT change the syntax of MIME media
+                 *       type and disposition lines, and
+                 *       
+                 * (2)   the mechanism MUST NOT depend on parameter ordering
+                 *       since MIME states that parameters are not order
+                 *       sensitive.  Note that while MIME does prohibit
+                 *       modification of MIME headers during transport, it is
+                 *       still possible that parameters will be reordered when
+                 *       user agent level processing is done.
+                 *       
+                 * The obvious solution, then, is to use multiple parameters to contain
+                 * a single parameter value and to use some kind of distinguished name
+                 * to indicate when this is being done.  And this obvious solution is
+                 * exactly what is specified here: The asterisk character ("*") followed
+                 * by a decimal count is employed to indicate that multiple parameters
+                 * are being used to encapsulate a single parameter value.  The count
+                 * starts at 0 and increments by 1 for each subsequent section of the
+                 * parameter value.  Decimal values are used and neither leading zeroes
+                 * nor gaps in the sequence are allowed.
+                 * 
+                 * The original parameter value is recovered by concatenating the
+                 * various sections of the parameter, in order.  For example, the
+                 * content-type field
+                 * 
+                 *   Content-Type: message/external-body; access-type=URL;
+                 *   URL*0="ftp://";
+                 *   URL*1="cs.utk.edu/pub/moore/bulk-mailer/bulk-mailer.tar"
+                 *   
+                 * is semantically identical to
+                 * 
+                 *   Content-Type: message/external-body; access-type=URL;
+                 *   URL="ftp://cs.utk.edu/pub/moore/bulk-mailer/bulk-mailer.tar"
+                 *   
+                 * Note that quotes around parameter values are part of the value
+                 * syntax; they are NOT part of the value itself.  Furthermore, it is
+                 * explicitly permitted to have a mixture of quoted and unquoted
+                 * continuation fields.
+                 * 
+                 * 
+                 * 
+                 * =================================================================
+                 * 
+                 * 
+                 * Combining Character Set, Language, and Parameter Continuations
+                 *   
+                 * Character set and language information may be combined with the
+                 * parameter continuation mechanism. For example:
+                 *   
+                 * Content-Type: application/x-stuff
+                 * title*0*=us-ascii'en'This%20is%20even%20more%20
+                 * title*1*=%2A%2A%2Afun%2A%2A%2A%20
+                 * title*2="isn't it!"
+                 *   
+                 * Note that:
+                 *   
+                 * (1)   Language and character set information only appear at
+                 *       the beginning of a given parameter value.
+                 *       
+                 * (2)   Continuations do not provide a facility for using more
+                 *       than one character set or language in the same
+                 *       parameter value.
+                 *       
+                 * (3)   A value presented using multiple continuations may
+                 *       contain a mixture of encoded and unencoded segments.
+                 *       
+                 * (4)   The first segment of a continuation MUST be encoded if
+                 *       language and character set information are given.
+                 *       
+                 * (5)   If the first segment of a continued parameter value is
+                 *       encoded the language and character set field delimiters
+                 *       MUST be present even when the fields are left blank.
+                 * 
+                 * https://tools.ietf.org/html/rfc2231
+                 */
 
-                    // ok - string begins with '$token'
+                if (preg_match("/^{$ci_token}\*0\*{$delimiter}/i", $item)) {
+                    /*
+                     * - multi-line property
+                     * - first occurrence
+                     * - language and encoding supplied (they could be empty though)
+                     * - must decode value
+                     * 
+                     * example: title*0*=us-ascii'en'This%20is%20even%20more%20
+                     */
                     list($key, $value) = explode($delimiter, $item, 2);
 
-                    // remove trailing / leading spaces from $value
-                    $value = trim($value);
+                    /*
+                     * Split content on:
+                     * 1. content encoding
+                     * 2. language
+                     * 3. value
+                     */
+                    $exploded = explode("'", $value);
 
-                    // when the header is composed, we
-                    // remove trailing / leading quotes from $value
-                    // remove trailing / leading double quotes from $value
-                    if ($delimiter == "=") {
-                        $value = trim($value, "'");
-                        $value = trim($value, "\"");
+                    $content_encoding = strtoupper($exploded[0]);
+                    $content_language = strtoupper($exploded[1]);
+
+                    $value = implode("'", array_slice($exploded, 2));
+
+                    /*
+                     * Content encoding supplied?
+                     */
+                    if (strlen($content_encoding) > 0 && $content_encoding != 'UTF-8') {
+                        $value = mb_convert_encoding($value, 'UTF-8', $content_encoding);
                     }
 
-                    return $value;
+                    /*
+                     * Decode ASCII chars (if present)
+                     */
+                    $value = urldecode($value);
+                } elseif (preg_match("/^{$ci_token}\*\d\*{$delimiter}/i", $item)) {
+
+                    /*
+                     * - multi-line property
+                     * - following occurrence
+                     * - language and encoding (if any) are supplied within first occurrence
+                     * - must decode value
+                     * 
+                     * example: title*1*=%2A%2A%2Afun%2A%2A%2A%20
+                     */
+                    list($key, $value) = explode($delimiter, $item, 2);
+
+                    /*
+                     * Content encoding supplied?
+                     */
+                    if (strlen($content_encoding) > 0 && $content_encoding != 'UTF-8') {
+                        $value = mb_convert_encoding($value, 'UTF-8', $content_encoding);
+                    }
+
+                    /*
+                     * Decode ASCII chars (if present)
+                     */
+                    $value = urldecode($value);
+                } elseif (preg_match("/^{$ci_token}\*\d{$delimiter}/i", $item)) {
+
+                    /*
+                     * - multi-line property
+                     * - must NOT decode value
+                     * 
+                     * example: title*2="isn't it!"
+                     */
+                    list($key, $value) = explode($delimiter, $item, 2);
+                } elseif (preg_match("/^{$ci_token}{$delimiter}/i", $item)) {
+                    /*
+                     * - single-line property
+                     * - must NOT decode value
+                     * 
+                     * example: title=myTitle
+                     */
+                    list($key, $value) = explode($delimiter, $item, 2);
+                } else {
+                    /*
+                     * Doesn't match!
+                     */
+                    continue;
                 }
+
+                /*
+                 * remove trailing / leading:
+                 * - spaces 
+                 * - quotes
+                 * - double quotes
+                 * from $value
+                 */
+                $value = trim($value);
+
+                if (strlen($value) > 2 && substr($value, 0, 1) == "'" && substr($value, -1) == "'") {
+                    $value = trim($value, "'");
+                } elseif (strlen($value) > 2 && substr($value, 0, 1) == "\"" && substr($value, -1) == "\"") {
+                    $value = trim($value, "\"");
+                }
+
+                /*
+                 * Init header value to empty string (if needed) 
+                 */
+                if (strlen($header_value) == 0) {
+                    $header_value = '';
+                }
+
+                $header_value .= $value;
             }
         }
 
-        return FALSE;
+        return $header_value;
     }
 
     /**
