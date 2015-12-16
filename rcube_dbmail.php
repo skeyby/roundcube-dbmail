@@ -283,6 +283,14 @@ class rcube_dbmail extends rcube_storage {
         $this->user_idnr = $row['user_idnr'];
         $_SESSION['user_idnr'] = $this->user_idnr;
 
+        // subscribe INBOX when needed
+        $mailbox_idnr = $this->get_mail_box_id('INBOX', $this->user_idnr);
+        if ($mailbox_idnr && !$this->folder_subscription_exists($mailbox_idnr)) {
+
+            // subsribe INBOX
+            $this->subscribe(array('INBOX'));
+        }
+
         return TRUE;
     }
 
