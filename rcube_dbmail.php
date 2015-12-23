@@ -43,7 +43,6 @@ class rcube_dbmail extends rcube_storage {
     /**
      * Searchable message headers
      */
-    private $headers_lookup = array();
     private $searchable_headers = array(
         'x-priority',
         'subject',
@@ -677,27 +676,44 @@ class rcube_dbmail extends rcube_storage {
         }
 
         /*
-         *  init search conditions
+         * Init $additional_joins list
          */
-        $search_conditions = NULL;
+        $additional_joins = '';
+
+        /*
+         * Retrieve search string 
+         */
+        $search_str = NULL;
         if (is_array($this->search_set) && array_key_exists(0, $this->search_set)) {
-            $search_conditions = $this->format_search_parameters($this->search_set[0]);
+            $tmp = $this->format_search_parameters($this->search_set[0]);
+            $search_str = $tmp->search;
+        }
+
+        $search_conditions = $this->_translate_search_parameters($search_str);
+        if (!$search_conditions) {
+            return FALSE;
         }
 
         /*
          *  set additional join tables according to supplied search / filter conditions
          */
-        $additional_joins = "";
         if (is_object($search_conditions) && property_exists($search_conditions, 'additional_join_tables')) {
-            $additional_joins .= " INNER JOIN dbmail_physmessage ON dbmail_messages.physmessage_id = dbmail_physmessage.id ";
             $additional_joins .= " {$search_conditions->additional_join_tables} ";
         }
 
         /*
          * Set base 'where' conditions
          */
-        $where_conditions = " WHERE dbmail_messages.mailbox_idnr = {$this->dbmail->escape($mailbox_idnr)} "
-                . " AND dbmail_messages.status < " . self::MESSAGE_STATUS_DELETE;
+        $where_conditions = " WHERE dbmail_messages.mailbox_idnr = {$this->dbmail->escape($mailbox_idnr)} ";
+        $where_conditions .= " AND dbmail_messages.status < " . self::MESSAGE_STATUS_DELETE . " ";
+
+        /*
+         * Apply search criteria
+         */
+        if (isset($search_conditions->additional_where_conditions) && strlen($search_conditions->additional_where_conditions) > 0) {
+            $where_conditions .= " AND {$search_conditions->additional_where_conditions}";
+            $additional_joins .= implode(PHP_EOL, $search_conditions->additional_joins);
+        }
 
         /*
          *  add 'where' conditions according to supplied search / filter conditions
@@ -724,6 +740,14 @@ class rcube_dbmail extends rcube_storage {
          */
         $query = " SELECT COUNT({$distinct_clause} dbmail_messages.message_idnr) AS items_count "
                 . " FROM dbmail_messages ";
+
+        /*
+         * Join to dbmail_physmessage when $additional_joins supplied 
+         */
+        if (strlen($additional_joins) > 0) {
+            $query .= " INNER JOIN dbmail_physmessage ON dbmail_messages.physmessage_id = dbmail_physmessage.id ";
+        }
+
         $query .= " {$additional_joins} ";
         $query .= " {$where_conditions} ";
 
@@ -882,12 +906,11 @@ class rcube_dbmail extends rcube_storage {
      */
     public function list_messages($folder = null, $page = null, $sort_field = null, $sort_order = null, $slice = 0) {
 
-        $search_conditions = NULL;
-        if (is_array($this->search_set) && array_key_exists(0, $this->search_set)) {
-            $search_conditions = $this->format_search_parameters($this->search_set[0]);
-        }
+        $folders = $this->_format_folders_list($folder);
 
-        return $this->_list_messages($folder, $page, $sort_field, $sort_order, $slice, $search_conditions, NULL);
+        $search_str = isset($this->search_set[0]) ? $this->search_set[0] : '';
+
+        return $this->_list_messages($folders, $page, $sort_field, $sort_order, $slice, $search_str, NULL);
     }
 
     /**
@@ -901,20 +924,11 @@ class rcube_dbmail extends rcube_storage {
      */
     public function index($folder = null, $sort_field = null, $sort_order = null) {
 
-        if (strlen($folder) == 0) {
-            $folder = $this->folder;
-        }
-
-        // ACLs check ('lookup' and 'read' grants required )
-        $ACLs = $this->_get_acl($folder);
-        if (!is_array($ACLs) || !in_array(self::ACL_LOOKUP_FLAG, $ACLs) || !in_array(self::ACL_READ_FLAG, $ACLs)) {
-            // Unauthorized!
-            return FALSE;
-        }
+        $folders = $this->_format_folders_list($folder);
 
         // get messages list
         $result_index_str = "";
-        $messages = $this->_list_messages($folder, 0, $sort_field, $sort_order);
+        $messages = $this->_list_messages($folders, 0, $sort_field, $sort_order);
         foreach ($messages as $message) {
             $result_index_str .= " {$message->uid}";
         }
@@ -936,48 +950,21 @@ class rcube_dbmail extends rcube_storage {
      */
     public function search($folder = null, $str = 'ALL', $charset = null, $sort_field = null) {
 
-        // normalize target folder/s
-        if (is_array($folder) && count($folder) > 0) {
-            $folders = $folder;
-        } elseif (strlen($folder) == 0) {
-            $folders = array($folder);
-        } else {
-            $folders = array($this->folder);
-        }
+        $folders = $this->_format_folders_list($folder);
 
-        // extract folders id
-        $mail_box_idnr_list = array();
-        foreach ($folders as $folder_name) {
-
-            // Retrieve mailbox ID
-            $mail_box_idnr = $this->get_mail_box_id($folder_name);
-            if (!$mail_box_idnr) {
-                // Not found - Skip!
-                continue;
-            }
-
-            // ACLs check ('lookup' and 'read' grants required )
-            $ACLs = $this->_get_acl(NULL, $mail_box_idnr);
-            if (!is_array($ACLs) || !in_array(self::ACL_LOOKUP_FLAG, $ACLs) || !in_array(self::ACL_READ_FLAG, $ACLs)) {
-                // Unauthorized - Skip!
-                continue;
-            }
-
-            // Add mailbox ID to mailboxes list
-            $mail_box_idnr_list[] = $mail_box_idnr;
-        }
-
-        // format search conditions
-        $search_conditions = $this->format_search_parameters($str);
+        /*
+         * ACL checks implemented within '_list_messages()'
+         */
 
         // get messages list
+        $messages = $this->_list_messages($folders, 0, $sort_field, 'ASC', 0, $str);
+
         $result_index_str = "";
-        $messages = $this->_list_messages($folder, 0, $sort_field, 'ASC', 0, $search_conditions);
         foreach ($messages as $message) {
             $result_index_str .= " {$message->uid}";
         }
 
-        $index = new rcube_result_index($folder, "* SORT {$result_index_str}");
+        $index = new rcube_result_index($folders, "* SORT {$result_index_str}");
 
         $this->search_set = array(
             $str,
@@ -997,43 +984,16 @@ class rcube_dbmail extends rcube_storage {
      */
     public function search_once($folder = null, $str = 'ALL') {
 
-        // normalize target folder/s
-        if (is_array($folder) && count($folder) > 0) {
-            $folders = $folder;
-        } elseif (strlen($folder) == 0) {
-            $folders = array($folder);
-        } else {
-            $folders = array($this->folder);
-        }
+        $folders = $this->_format_folders_list($folder);
 
-        // extract folders id
-        $mail_box_idnr_list = array();
-        foreach ($folders as $folder_name) {
-
-            // Retrieve mailbox ID
-            $mail_box_idnr = $this->get_mail_box_id($folder_name);
-            if (!$mail_box_idnr) {
-                // Not found - Skip!
-                continue;
-            }
-
-            // ACLs check ('lookup' and 'read' grants required )
-            $ACLs = $this->_get_acl(NULL, $mail_box_idnr);
-            if (!is_array($ACLs) || !in_array(self::ACL_LOOKUP_FLAG, $ACLs) || !in_array(self::ACL_READ_FLAG, $ACLs)) {
-                // Unauthorized - Skip!
-                continue;
-            }
-
-            // Add mailbox ID to mailboxes list
-            $mail_box_idnr_list[] = $mail_box_idnr;
-        }
-
-        // format search conditions
-        $search_conditions = $this->format_search_parameters($str);
+        /*
+         * ACL checks implemented within '_list_messages()'
+         */
 
         // get messages list
+        $messages = $this->_list_messages($folders, 0, NULL, 'ASC', 0, $str);
+
         $result_index_str = "";
-        $messages = $this->_list_messages($folder, 0, NULL, 'ASC', 0, $search_conditions);
         foreach ($messages as $message) {
             $result_index_str .= " {$message->uid}";
         }
@@ -3586,9 +3546,9 @@ class rcube_dbmail extends rcube_storage {
     private function get_message_record($message_idnr) {
 
         $query = " SELECT * "
-                . " FROM dbmail_messages, dbmail_physmessage "
-                . " WHERE message_idnr = '{$this->dbmail->escape($message_idnr)}' "
-                . " AND dbmail_physmessage.id = dbmail_messages.physmessage_id";
+                . " FROM dbmail_messages "
+                . " INNER JOIN dbmail_physmessage ON dbmail_messages.physmessage_id = dbmail_physmessage.id  "
+                . " WHERE message_idnr = '{$this->dbmail->escape($message_idnr)}' ";
 
         $res = $this->dbmail->query($query);
         if ($this->dbmail->num_rows($res) == 0) {
@@ -4205,6 +4165,7 @@ class rcube_dbmail extends rcube_storage {
              */
             $message_data = array(
                 'message_idnr' => $message_record["message_idnr"],
+                'unique_id' => $message_record["unique_id"],
                 'physmessage_id' => $message_record['physmessage_id'],
                 'message_size' => $message_record["messagesize"],
                 'seen_flag' => $message_record["seen_flag"],
@@ -4378,6 +4339,13 @@ class rcube_dbmail extends rcube_storage {
         } else {
             $search_str = $str;
         }
+
+        $response = new stdClass();
+        $response->filters = $filter_str;
+        $response->search = $search_str;
+
+        return $response;
+
 
         $formatted_search = array();
         $formatted_filter = array();
@@ -4668,29 +4636,49 @@ class rcube_dbmail extends rcube_storage {
      * @param   string   $sort_field Header field to sort by
      * @param   string   $sort_order Sort order [ASC|DESC]
      * @param   int      $slice      Number of slice items to extract from result array
-     * @param   array    $search_conditions Search conditions
+     * @param   string   $search_str
      *
      * @return  array    Indexed array with message header objects
      */
-    private function _list_messages($folder = null, $page = null, $sort_field = null, $sort_order = null, $slice = 0, $search_conditions = NULL) {
+    private function _list_messages($folders = null, $page = null, $sort_field = null, $sort_order = null, $slice = 0, $search_str = NULL) {
 
-        if (strlen($folder) == 0) {
-            $folder = $this->folder;
+        if (!is_array($folders) || count($folders) == 0) {
+            // no mailboxes supplied!
+            return FALSE;
+        }
+
+        // extract folders id
+        $mail_box_idnr_list = array();
+        foreach ($folders as $folder_name) {
+
+            // Retrieve mailbox ID
+            $mail_box_idnr = $this->get_mail_box_id($folder_name);
+            if (!$mail_box_idnr) {
+                // Not found - Skip!
+                return FALSE;
+            }
+
+            // ACLs check ('lookup' and 'read' grants required )
+            $ACLs = $this->_get_acl(NULL, $mail_box_idnr);
+            if (!is_array($ACLs) || !in_array(self::ACL_LOOKUP_FLAG, $ACLs) || !in_array(self::ACL_READ_FLAG, $ACLs)) {
+                // Unauthorized - Skip!
+                return FALSE;
+            }
+
+            // Add mailbox ID to mailboxes list
+            $mail_box_idnr_list[] = $mail_box_idnr;
         }
 
         /*
-         * Get current mailbox folder ID
+         * Init additional join tables list
          */
-        $mailbox_idnr = $this->get_mail_box_id($folder);
+        $additional_joins = "";
 
         /*
-         * ACLs check ('lookup' and 'read' grants required )
+         * Format search string
          */
-        $ACLs = $this->_get_acl(NULL, $mailbox_idnr);
-        if (!is_array($ACLs) || !in_array(self::ACL_LOOKUP_FLAG, $ACLs) || !in_array(self::ACL_READ_FLAG, $ACLs)) {
-            /*
-             *  Unauthorized!
-             */
+        $search_conditions = $this->_translate_search_parameters($search_str);
+        if (!$search_conditions) {
             return FALSE;
         }
 
@@ -4707,27 +4695,17 @@ class rcube_dbmail extends rcube_storage {
         $query_limit = $this->page_size;
 
         /*
-         * Set additional join tables according to supplied search conditions
-         */
-        $additional_joins = "";
-        if (is_object($search_conditions) && property_exists($search_conditions, 'additional_join_tables')) {
-            $additional_joins .= " {$search_conditions->additional_join_tables}";
-        }
-
-        /*
-         * "Base Condition" is that the message should not be EXPUNGED (thus DELETED)
+         * "Base Condition" is that the message should not be EXPUNGED (thus DELETED) and within target mailboxes
          */
         $where_conditions = " WHERE dbmail_messages.status < " . self::MESSAGE_STATUS_DELETE;
+        $where_conditions .= " AND dbmail_messages.mailbox_idnr IN (" . implode(",", $mail_box_idnr_list) . ")";
 
         /*
-         * Set where conditions according to supplied search / filter conditions
+         * Apply search criteria
          */
-        if (is_object($search_conditions) && property_exists($search_conditions, 'formatted_filter_str') && strlen($search_conditions->formatted_filter_str) > 0) {
-            $where_conditions .= " AND ( {$search_conditions->formatted_filter_str} )";
-        }
-
-        if (is_object($search_conditions) && property_exists($search_conditions, 'formatted_search_str') && strlen($search_conditions->formatted_search_str) > 0) {
-            $where_conditions .= " AND ( {$search_conditions->formatted_search_str} )";
+        if (isset($search_conditions->additional_where_conditions) && strlen($search_conditions->additional_where_conditions) > 0) {
+            $where_conditions .= " AND {$search_conditions->additional_where_conditions}";
+            $additional_joins .= implode(PHP_EOL, $search_conditions->additional_joins);
         }
 
         /*
@@ -4788,9 +4766,16 @@ class rcube_dbmail extends rcube_storage {
         $query = " SELECT $distinct_clause dbmail_messages.message_idnr, dbmail_messages.physmessage_id, "
                 . " dbmail_physmessage.messagesize, dbmail_messages.seen_flag, "
                 . " dbmail_messages.answered_flag, dbmail_messages.deleted_flag, "
-                . " dbmail_messages.flagged_flag "
-                . " FROM dbmail_messages "
-                . " INNER JOIN dbmail_physmessage ON dbmail_messages.physmessage_id = dbmail_physmessage.id AND dbmail_messages.mailbox_idnr = {$this->dbmail->escape($mailbox_idnr)} ";
+                . " dbmail_messages.flagged_flag, dbmail_messages.mailbox_idnr, "
+                . " dbmail_messages.unique_id "
+                . " FROM dbmail_messages ";
+
+        /*
+         * Join to dbmail_physmessage when $additional_joins supplied
+         */
+        if (strlen($additional_joins) > 0) {
+            $query .= " INNER JOIN dbmail_physmessage ON dbmail_messages.physmessage_id = dbmail_physmessage.id ";
+        }
 
         $query .= " {$additional_joins} ";
         $query .= " {$where_conditions} ";
@@ -4805,6 +4790,7 @@ class rcube_dbmail extends rcube_storage {
 
             $message_data = array(
                 'message_idnr' => $msg["message_idnr"],
+                'unique_id' => $msg["unique_id"],
                 'physmessage_id' => $msg['physmessage_id'],
                 'message_size' => $msg["messagesize"],
                 'seen_flag' => $msg["seen_flag"],
@@ -4812,9 +4798,9 @@ class rcube_dbmail extends rcube_storage {
                 'deleted_flag' => $msg["deleted_flag"],
                 'flagged_flag' => $msg["flagged_flag"],
                 'folder_record' => array(
-                    'name' => $folder
+                    'name' => $this->get_mail_box_name($msg["mailbox_idnr"])
                 ),
-                'mailbox_idnr' => $mailbox_idnr
+                'mailbox_idnr' => $msg["mailbox_idnr"]
             );
 
             $headers[$msg_index] = $this->retrieve_message($msg["message_idnr"], $message_data, FALSE);
@@ -5916,6 +5902,1494 @@ class rcube_dbmail extends rcube_storage {
         }
 
         return TRUE;
+    }
+
+    private function _format_folders_list($folder) {
+
+        if (is_array($folder) && count($folder) > 0) {
+
+            $folders = array();
+
+            foreach ($folder as $folderName) {
+
+                $folderName = trim($folderName);
+
+                if (strlen($folderName) > 0) {
+                    $folders[] = $folderName;
+                }
+            }
+
+            return count($folders) > 0 ? $folders : array($this->folder);
+        } elseif (is_string($folder) && strlen(trim($folder)) > 0) {
+            return array(trim($folder));
+        } else {
+            return array($this->folder);
+        }
+    }
+
+    /**
+     * Translate search filters
+     * @param string $search_string
+     * @return array formatted search parameters
+     */
+    private function _translate_search_parameters($search_string = '') {
+
+        /*
+         * Search parameters are supplied in polish notation and could contain nested blocks:
+         * eg:
+         *      - OR SUBJECT "aaaa"  (OR HEADER FROM "bbbb"  (OR HEADER TO "cccc"  (OR CC "dddd" BCC "eeee")))
+         *      - OR SUBJECT "aaaa" HEADER FROM "bbbb" OR HEADER TO "cccc" CC "dddd" ALL BCC "5555" 
+         *      - OR OR OR OR OR HEADER SUBJECT 123456 HEADER FROM 123456 HEADER TO 123456 HEADER CC 123456 HEADER BCC 123456 BODY 123456
+         *      - ALL SUBJECT "aaaa" ALL HEADER FROM "bbbb" ALL HEADER TO "cccc" ALL CC "dddd" ALL BCC "5555"
+         *      - ALL
+         */
+
+        /*
+         * Init response container
+         */
+        $search_conditions = new stdClass();
+        $search_conditions->additional_joins = array();
+        $search_conditions->additional_where_conditions = '';
+
+        if (strlen($search_string) == 0) {
+            /*
+             * Empry set
+             */
+            return $search_conditions;
+        }
+
+        /*
+         * Init sequence container (to produce unique table aliases)
+         */
+        $sequence = 0;
+
+        /*
+         * Init placeholders container
+         */
+        $placeholders = array();
+        $placeholder_index = 0;
+
+        /*
+         * Strip unnecessary whitespaces from search string
+         */
+        $search_string = preg_replace('/\s+/', ' ', trim($search_string));
+
+        /*
+         * Wrap supplied $search_string 
+         */
+        $search_string = '(' . $search_string . ')';
+
+        while (strrpos($search_string, '(') !== FALSE) {
+
+            /*
+             * We start from last parenthesised condition. Let's retrieve last open parenthesis position
+             */
+            $opening_parenthesis_position = strrpos($search_string, '(');
+
+            /*
+             * Retrieve ollowing closing parenthesis position
+             */
+            $closing_parenthesis_position = strpos($search_string, ')', $opening_parenthesis_position);
+            if ($closing_parenthesis_position === FALSE) {
+                return FALSE;
+            }
+
+            /*
+             * Extract parenthesised search criteria
+             */
+            $parenthesised_search_criteria = substr($search_string, ($opening_parenthesis_position + 1), ($closing_parenthesis_position - $opening_parenthesis_position - 1));
+
+            /*
+             * Tokenize search criteria
+             */
+            $items = $this->_tokenize_string($parenthesised_search_criteria);
+
+            /*
+             * Step 1: split 'ANDed' segments ('ALL' keyword)
+             */
+            $segments = array();
+            $segment_index = 0;
+
+            foreach ($items as $item) {
+
+                if ($item == 'ALL') {
+                    $segment_index++;
+                    continue;
+                }
+
+                $segments[$segment_index][] = $item;
+            }
+
+            /*
+             * Init temporary containers
+             */
+            $additional_where_conditions = '';
+
+            /*
+             * Step 2: fetch splitted segments to manage 'ORed' conditions
+             */
+            foreach ($segments as $segment_index => $segment) {
+
+                /*
+                 * At this point, within the segment all operands are 'ORed'. So we can ingore operators and directly work on operands.
+                 */
+                $ORed_conditions = 0;
+                while (in_array('OR', $segment) !== FALSE) {
+                    $position = array_search('OR', $segment);
+                    unset($segment[$position]);
+                    $ORed_conditions++;
+                }
+
+                $segment = array_values($segment);
+
+                $segment_where_conditions = '';
+
+                while (count($segment) > 0) {
+
+                    /*
+                     * Placeholder replacement?
+                     */
+                    if (substr($segment[0], 0, 15) == '###PLACEHOLDER_' && array_key_exists($segment[0], $placeholders)) {
+
+                        /*
+                         * Placeholder found!
+                         */
+                        $segment_where_conditions[] = " ( {$placeholders[$segment[0]]} ) ";
+
+                        unset($placeholders[$segment[0]]);
+                        unset($segment[0]);
+
+                        $segment = array_values($segment);
+
+                        continue;
+                    }
+
+
+                    $sql_structure = $this->_apply_search_parameters($segment, $sequence);
+                    if ($sql_structure === FALSE) {
+                        return FALSE;
+                    }
+
+                    /*
+                     * Update  temporary containers
+                     */
+                    foreach ($sql_structure->additional_joins as $additional_join) {
+                        $search_conditions->additional_joins[] = $additional_join;
+                    }
+
+                    $segment_where_conditions[] = " ( {$sql_structure->additional_where_conditions} ) ";
+                }
+
+                if (strlen($additional_where_conditions) > 0) {
+                    $additional_where_conditions .= " AND ";
+                }
+
+                $additional_where_conditions .= " ( " . implode(' OR ', $segment_where_conditions) . " ) ";
+            }
+
+            /*
+             * Set placeholder
+             */
+            $placeholder_index++;
+            $placeholder = "###PLACEHOLDER_{$placeholder_index}###";
+            $placeholders[$placeholder] = $additional_where_conditions;
+
+
+            /*
+             * Replace content with target placeholder
+             */
+            $search_string = substr_replace($search_string, $placeholder, $opening_parenthesis_position, ($closing_parenthesis_position - $opening_parenthesis_position + 1));
+        }
+
+
+        /*
+         * At this point, $placeholders list must contain only 1 item
+         */
+        if (count($placeholders) != 1) {
+            return FALSE;
+        }
+
+        /*
+         * Ok - Extract 'additional_where_conditions' from $placeholders list
+         */
+        $search_conditions->additional_where_conditions = array_pop($placeholders);
+
+        return $search_conditions;
+    }
+
+    /**
+     * Parse IMAP search parameters into an array
+     * @param string $string IMAP search string
+     * @return array tokens
+     */
+    private function _tokenize_string($string = '') {
+
+        $arguments_delimiter = '"';
+        $escape_sign = '\\';
+
+        /*
+         * Init stack
+         */
+        $tokens = array(
+            0 => ''
+        );
+
+        /*
+         * Keep track of quoted strings
+         */
+        $is_quoted = FALSE;
+
+        /*
+         * Fetch 1 char at time from input string
+         */
+        $string = trim($string);
+        $chars = str_split($string);
+
+        foreach ($chars as $index => $char) {
+
+            /*
+             * Get latest stack token index
+             */
+            $token_index = count($tokens) - 1;
+
+            /*
+             * Get previous and following chars
+             */
+            $previous_char = array_key_exists($index - 1, $chars) ? $chars[$index - 1] : '';
+            $following_char = array_key_exists($index + 1, $chars) ? $chars[$index + 1] : '';
+
+            if (!$is_quoted && $char == $arguments_delimiter && $previous_char == " ") {
+                /*
+                 * Opening quote found
+                 */
+                $tokens[$token_index] .= $char;
+                $is_quoted = TRUE;
+                continue;
+            }
+
+            if ($is_quoted && $char == $arguments_delimiter && $previous_char == $escape_sign) {
+
+                /*
+                 * Escaped quote found
+                 */
+                $tokens[$token_index] .= $char;
+                continue;
+            }
+
+            if ($is_quoted && $char == $arguments_delimiter && $previous_char != $escape_sign && $following_char == " ") {
+
+                /*
+                 * Closing quote found
+                 */
+                $tokens[$token_index] .= $char;
+                $is_quoted = FALSE;
+                continue;
+            }
+
+            if ($char != ' ') {
+                /*
+                 * Push char into latest stack token
+                 */
+                $tokens[$token_index] .= $char;
+                continue;
+            }
+
+            /*
+             * Add one more stack token
+             */
+            $token_index++;
+            $tokens[$token_index] = '';
+        }
+
+        return $tokens;
+    }
+
+    /**
+     * Apply supplied search parameters.
+     * @param array $items tokenized IMAP search string (passed by reference to directly remove used tokens)
+     * @param int $sequence
+     * @return array matching messages IDs on success, FALSE on failure
+     */
+    private function _apply_search_parameters(&$items = array(), &$sequence = 0) {
+
+        /*
+         * Valid input?
+         */
+        if (!is_array($items) || !array_key_exists(0, $items)) {
+            return FALSE;
+        }
+
+        /*
+         * Init response container
+         */
+        $search_conditions = new stdClass();
+        $search_conditions->additional_joins = array();
+        $search_conditions->additional_where_conditions = '';
+
+        /*
+         * Not keyword supplied? (reverse search)
+         */
+        $is_not = FALSE;
+        if ($items[0] == 'NOT') {
+
+            $is_not = TRUE;
+
+            /*
+             * Remove 'NOT' clause from operator
+             */
+            $items = array_slice($items, 1);
+        }
+
+
+        /*
+         * Operators management
+         */
+        switch ($items[0]) {
+            case 'ANSWERED':
+
+                /*
+                  ANSWERED
+                  Messages with the \Answered flag set.
+                 */
+                $search_conditions->additional_joins = array();
+
+                if (!$is_not) {
+                    $search_conditions->additional_where_conditions = "dbmail_messages.answered_flag = 1";
+                } else {
+                    $search_conditions->additional_where_conditions = "dbmail_messages.answered_flag <> 1";
+                }
+                /*
+                 * Unset managed items
+                 */
+                $items = array_slice($items, 1);
+
+                break;
+            case 'BCC':
+
+                /*
+                  BCC <string>
+                  Messages that contain the specified string in the envelope
+                  structure's BCC field.
+                 */
+
+                if (!array_key_exists(1, $items)) {
+                    /*
+                     * Error - Missing parameters
+                     */
+                    return FALSE;
+                }
+
+                $header_name_id = $this->get_header_id_by_header_name('bcc');
+                if (!$header_name_id) {
+                    /*
+                     * Missing lookup value - return empty string (this is NON an error!)
+                     */
+                    return array();
+                }
+
+                $unquoted_value = trim($items[1], '"');
+
+                /*
+                 * Set tables alias
+                 */
+                $sequence++;
+                $dbmail_header_alias = "dbmail_header_{$sequence}";
+
+                $sequence++;
+                $dbmail_headervalue_alias = "dbmail_headervalue_{$sequence}";
+
+                $search_conditions->additional_joins = array(
+                    "INNER JOIN dbmail_header AS {$dbmail_header_alias} ON dbmail_physmessage.id = {$dbmail_header_alias}.physmessage_id",
+                    "INNER JOIN dbmail_headervalue AS {$dbmail_headervalue_alias} ON {$dbmail_header_alias}.headervalue_id = {$dbmail_headervalue_alias}.id"
+                );
+
+                if (!$is_not) {
+                    $search_conditions->additional_where_conditions = "{$dbmail_header_alias}.headername_id = {$header_name_id} AND {$dbmail_headervalue_alias}.headervalue LIKE '%{$this->dbmail->escape($unquoted_value)}%'";
+                } else {
+                    $search_conditions->additional_where_conditions = "{$dbmail_header_alias}.headername_id = {$header_name_id} AND {$dbmail_headervalue_alias}.headervalue NOT LIKE '%{$this->dbmail->escape($unquoted_value)}%'";
+                }
+
+                /*
+                 * Unset managed items
+                 */
+                $items = array_slice($items, 2);
+
+                break;
+            case 'BEFORE':
+
+                /*
+                  BEFORE <date>
+                  Messages whose internal date (disregarding time and timezone)
+                  is earlier than the specified date.
+                 */
+
+                if (!array_key_exists(1, $items)) {
+                    /*
+                     * Error - Missing parameters
+                     */
+                    return FALSE;
+                }
+
+                $unquoted_value = trim($items[1], '"');
+
+                $datetime_value = date_create_from_format('j-M-Y', $unquoted_value);
+                if (!$datetime_value) {
+                    /*
+                     * Malformed datetime
+                     */
+                    return FALSE;
+                }
+
+                $search_conditions->additional_joins = array();
+
+                if (!$is_not) {
+                    $search_conditions->additional_where_conditions = "dbmail_physmessage.internal_date < '{$datetime_value->format('Y-m-d')} 00:00:00'";
+                } else {
+                    $search_conditions->additional_where_conditions = "dbmail_physmessage.internal_date >= '{$datetime_value->format('Y-m-d')} 00:00:00'";
+                }
+
+                /*
+                 * Unset managed items
+                 */
+                $items = array_slice($items, 2);
+
+                break;
+            case 'BODY':
+
+                /*
+                  BODY <string>
+                  Messages that contain the specified string in the body of the
+                  message.
+                 */
+
+                if (!array_key_exists(1, $items)) {
+                    /*
+                     * Error - Missing parameters
+                     */
+                    return FALSE;
+                }
+
+                $unquoted_value = trim($items[1], '"');
+
+                /*
+                 * Set tables alias
+                 */
+                $sequence++;
+                $dbmail_partlists_alias = "dbmail_partlists_{$sequence}";
+
+                $sequence++;
+                $dbmail_mimeparts_alias = "dbmail_mimeparts_{$sequence}";
+
+                $search_conditions->additional_joins = array(
+                    "INNER JOIN dbmail_partlists AS  {$dbmail_partlists_alias} ON dbmail_physmessage.id = {$dbmail_partlists_alias}.physmessage_id",
+                    "INNER JOIN dbmail_mimeparts AS {$dbmail_mimeparts_alias} ON {$dbmail_partlists_alias}.part_id = {$dbmail_mimeparts_alias}.id"
+                );
+
+                if (!$is_not) {
+                    $search_conditions->additional_where_conditions = "{$dbmail_partlists_alias}.is_header = 0 AND {$dbmail_mimeparts_alias}.data LIKE '%{$this->dbmail->escape($unquoted_value)}%'";
+                } else {
+                    $search_conditions->additional_where_conditions = "{$dbmail_partlists_alias}.is_header = 0 AND {$dbmail_mimeparts_alias}.data NOT LIKE '%{$this->dbmail->escape($unquoted_value)}%'";
+                }
+
+                /*
+                 * Unset managed items
+                 */
+                $items = array_slice($items, 2);
+
+                break;
+            case 'CC':
+
+                /*
+                  CC <string>
+                  Messages that contain the specified string in the envelope
+                  structure's CC field.
+                 */
+
+                if (!array_key_exists(1, $items)) {
+                    /*
+                     * Error - Missing parameters
+                     */
+                    return FALSE;
+                }
+
+                $header_name_id = $this->get_header_id_by_header_name('cc');
+                if (!$header_name_id) {
+                    /*
+                     * Missing lookup value - return empty string (this is NON an error!)
+                     */
+                    return array();
+                }
+
+                $unquoted_value = trim($items[1], '"');
+
+
+                /*
+                 * Set tables alias
+                 */
+                $sequence++;
+                $dbmail_header_alias = "dbmail_header_{$sequence}";
+
+                $sequence++;
+                $dbmail_headervalue_alias = "dbmail_headervalue_{$sequence}";
+
+                $search_conditions->additional_joins = array(
+                    "INNER JOIN dbmail_header AS {$dbmail_header_alias} ON dbmail_physmessage.id = {$dbmail_header_alias}.physmessage_id",
+                    "INNER JOIN dbmail_headervalue AS {$dbmail_headervalue_alias} ON {$dbmail_header_alias}.headervalue_id = {$dbmail_headervalue_alias}.id"
+                );
+
+                if (!$is_not) {
+                    $search_conditions->additional_where_conditions = "{$dbmail_header_alias}.headername_id = {$header_name_id} AND {$dbmail_headervalue_alias}.headervalue LIKE '%{$this->dbmail->escape($unquoted_value)}%'";
+                } else {
+                    $search_conditions->additional_where_conditions = "{$dbmail_header_alias}.headername_id = {$header_name_id} AND {$dbmail_headervalue_alias}.headervalue NOT LIKE '%{$this->dbmail->escape($unquoted_value)}%'";
+                }
+
+                /*
+                 * Unset managed items
+                 */
+                $items = array_slice($items, 2);
+
+                break;
+            case 'DELETED':
+
+                /*
+                  DELETED
+                  Messages with the \Deleted flag set.
+                 */
+
+                $search_conditions->additional_joins = array();
+
+                if (!$is_not) {
+                    $search_conditions->additional_where_conditions = "dbmail_messages.deleted_flag = 1";
+                } else {
+                    $search_conditions->additional_where_conditions = "dbmail_messages.deleted_flag <> 1";
+                }
+
+                /*
+                 * Unset managed items
+                 */
+                $items = array_slice($items, 1);
+
+                break;
+            case 'DRAFT':
+
+                /*
+                  DRAFT
+                  Messages with the \Draft flag set.
+                 */
+
+                $search_conditions->additional_joins = array();
+
+                if (!$is_not) {
+                    $search_conditions->additional_where_conditions = "dbmail_messages.draft_flag = 1";
+                } else {
+                    $search_conditions->additional_where_conditions = "dbmail_messages.draft_flag <> 1";
+                }
+
+                $items = array_slice($items, 1);
+
+                break;
+            case 'FLAGGED':
+
+                /*
+                  FLAGGED
+                  Messages with the \Flagged flag set.
+                 */
+
+                $search_conditions->additional_joins = array();
+
+                if (!$is_not) {
+                    $search_conditions->additional_where_conditions = "dbmail_messages.flagged_flag = 1";
+                } else {
+                    $search_conditions->additional_where_conditions = "dbmail_messages.flagged_flag <> 1";
+                }
+
+                /*
+                 * Unset managed items
+                 */
+                $items = array_slice($items, 1);
+
+                break;
+            case 'FROM':
+
+                /*
+                  FROM <string>
+                  Messages that contain the specified string in the envelope
+                  structure's FROM field.
+                 */
+
+                if (!array_key_exists(1, $items)) {
+                    /*
+                     * Error - Missing parameters
+                     */
+                    return FALSE;
+                }
+
+                $header_name_id = $this->get_header_id_by_header_name('from');
+                if (!$header_name_id) {
+                    /*
+                     * Missing lookup value - return empty string (this is NON an error!)
+                     */
+                    return array();
+                }
+
+                $unquoted_value = trim($items[1], '"');
+
+                /*
+                 * Set tables alias
+                 */
+                $sequence++;
+                $dbmail_header_alias = "dbmail_header_{$sequence}";
+
+                $sequence++;
+                $dbmail_headervalue_alias = "dbmail_headervalue_{$sequence}";
+
+                $search_conditions->additional_joins = array(
+                    "INNER JOIN dbmail_header AS {$dbmail_header_alias} ON dbmail_physmessage.id = {$dbmail_header_alias}.physmessage_id",
+                    "INNER JOIN dbmail_headervalue AS {$dbmail_headervalue_alias} ON {$dbmail_header_alias}.headervalue_id = {$dbmail_headervalue_alias}.id"
+                );
+
+                if (!$is_not) {
+                    $search_conditions->additional_where_conditions = "{$dbmail_header_alias}.headername_id = {$header_name_id} AND {$dbmail_headervalue_alias}.headervalue LIKE '%{$this->dbmail->escape($unquoted_value)}%'";
+                } else {
+                    $search_conditions->additional_where_conditions = "{$dbmail_header_alias}.headername_id = {$header_name_id} AND {$dbmail_headervalue_alias}.headervalue NOT LIKE '%{$this->dbmail->escape($unquoted_value)}%'";
+                }
+
+                /*
+                 * Unset managed items
+                 */
+                $items = array_slice($items, 2);
+
+                break;
+            case 'HEADER':
+
+                /*
+                  HEADER <field-name> <string>
+                  Messages that have a header with the specified field-name (as
+                  defined in [RFC-2822]) and that contains the specified string
+                  in the text of the header (what comes after the colon).  If the
+                  string to search is zero-length, this matches all messages that
+                  have a header line with the specified field-name regardless of
+                  the contents.
+                 */
+
+                if (!array_key_exists(1, $items) || !array_key_exists(2, $items)) {
+                    /*
+                     * Error - Missing parameters
+                     */
+                    return FALSE;
+                }
+
+                $header_name_id = $this->get_header_id_by_header_name(strtolower($items[1]));
+                if (!$header_name_id) {
+                    /*
+                     * Missing lookup value - return empty string (this is NON an error!)
+                     */
+                    return array();
+                }
+
+                $unquoted_value = trim($items[2], '"');
+
+                /*
+                 * Set tables alias
+                 */
+                $sequence++;
+                $dbmail_header_alias = "dbmail_header_{$sequence}";
+
+                $sequence++;
+                $dbmail_headervalue_alias = "dbmail_headervalue_{$sequence}";
+
+                $search_conditions->additional_joins = array(
+                    "INNER JOIN dbmail_header AS {$dbmail_header_alias} ON dbmail_physmessage.id = {$dbmail_header_alias}.physmessage_id",
+                    "INNER JOIN dbmail_headervalue AS {$dbmail_headervalue_alias} ON {$dbmail_header_alias}.headervalue_id = {$dbmail_headervalue_alias}.id"
+                );
+
+                if (!$is_not) {
+                    $search_conditions->additional_where_conditions = "{$dbmail_header_alias}.headername_id = {$header_name_id} AND {$dbmail_headervalue_alias}.headervalue LIKE '%{$this->dbmail->escape($unquoted_value)}%'";
+                } else {
+                    $search_conditions->additional_where_conditions = "{$dbmail_header_alias}.headername_id = {$header_name_id} AND {$dbmail_headervalue_alias}.headervalue NOT LIKE '%{$this->dbmail->escape($unquoted_value)}%'";
+                }
+
+                /*
+                 * Unset managed items
+                 */
+                $items = array_slice($items, 3);
+
+                break;
+            case 'KEYWORD':
+
+                /*
+                  KEYWORD <flag>
+                  Messages with the specified keyword flag set.
+                 */
+
+                if (!array_key_exists(1, $items)) {
+                    /*
+                     * Error - Missing parameters
+                     */
+                    return FALSE;
+                }
+
+                $unquoted_value = trim($items[1], '"');
+
+                /*
+                 * Set tables alias
+                 */
+                $sequence++;
+                $dbmail_keywords_alias = "dbmail_keywords{$sequence}";
+
+                $search_conditions->additional_joins = array(
+                    "INNER JOIN dbmail_keywords AS {$dbmail_keywords_alias} on dbmail_messages.message_idnr = {$dbmail_keywords_alias}.message_idnr"
+                );
+
+                if (!$is_not) {
+                    $search_conditions->additional_where_conditions = "{$dbmail_keywords_alias}.keyword = '{$this->dbmail->escape($unquoted_value)}'";
+                } else {
+                    $search_conditions->additional_where_conditions = "{$dbmail_keywords_alias}.keyword <> '{$this->dbmail->escape($unquoted_value)}'";
+                }
+
+                /*
+                 * Unset managed items
+                 */
+                $items = array_slice($items, 1);
+
+                break;
+            case 'LARGER':
+
+                /*
+                  LARGER <n>
+                  Messages with an [RFC-2822] size larger than the specified
+                  number of octets.
+                 */
+
+                if (!array_key_exists(1, $items)) {
+                    /*
+                     * Error - Missing parameters
+                     */
+                    return FALSE;
+                }
+
+                $unquoted_value = trim($items[1], '"');
+
+                $search_conditions->additional_joins = array();
+
+                if (!$is_not) {
+                    $search_conditions->additional_where_conditions = "dbmail_physmessage.rfcsize > '{$this->dbmail->escape($unquoted_value)}'";
+                } else {
+                    $search_conditions->additional_where_conditions = "dbmail_physmessage.rfcsize <= '{$this->dbmail->escape($unquoted_value)}'";
+                }
+
+                /*
+                 * Unset managed items
+                 */
+                $items = array_slice($items, 2);
+
+                break;
+            case 'NEW':
+
+                /*
+                  NEW
+                  Messages that have the \Recent flag set but not the \Seen flag.
+                  This is functionally equivalent to "(RECENT UNSEEN)".
+                 */
+                $search_conditions->additional_joins = array();
+
+                if (!$is_not) {
+                    $search_conditions->additional_where_conditions = "dbmail_messages.recent_flag = 1 AND dbmail_messages.seen_flag = 0";
+                } else {
+                    $search_conditions->additional_where_conditions = "dbmail_messages.recent_flag = 1 AND dbmail_messages.seen_flag <> 0";
+                }
+
+                /*
+                 * Unset managed items
+                 */
+                $items = array_slice($items, 1);
+
+                break;
+            case 'OLD':
+
+                /*
+                  OLD
+                  Messages that do not have the \Recent flag set.  This is
+                  functionally equivalent to "NOT RECENT" (as opposed to "NOT
+                  NEW").
+                 */
+
+                $search_conditions->additional_joins = array();
+
+                if (!$is_not) {
+                    $search_conditions->additional_where_conditions = "dbmail_messages.recent_flag = 0";
+                } else {
+                    $search_conditions->additional_where_conditions = "dbmail_messages.recent_flag <> 0";
+                }
+
+                /*
+                 * Unset managed items
+                 */
+                $items = array_slice($items, 1);
+
+                break;
+            case 'ON':
+
+                /*
+                  ON <date>
+                  Messages whose internal date (disregarding time and timezone)
+                  is within the specified date.
+                 */
+
+                if (!array_key_exists(1, $items)) {
+                    /*
+                     * Error - Missing parameters
+                     */
+                    return FALSE;
+                }
+
+                $unquoted_value = trim($items[1], '"');
+
+                $datetime_value = date_create_from_format('j-M-Y', $unquoted_value);
+                if (!$datetime_value) {
+                    /*
+                     * Malformed datetime
+                     */
+                    return FALSE;
+                }
+
+                $search_conditions->additional_joins = array();
+
+                if (!$is_not) {
+                    $search_conditions->additional_where_conditions = "dbmail_physmessage.internal_date BETWEEN '{$datetime_value->format('Y-m-d')} 00:00:00' AND '{$datetime_value->format('Y-m-d')} 23:59:59'";
+                } else {
+                    $search_conditions->additional_where_conditions = "dbmail_physmessage.internal_date < '{$datetime_value->format('Y-m-d')} 00:00:00' OR dbmail_physmessage.internal_date > '{$datetime_value->format('Y-m-d')} 23:59:59'";
+                }
+
+                /*
+                 * Unset managed items
+                 */
+                $items = array_slice($items, 2);
+                break;
+
+            case 'RECENT':
+
+                /*
+                  RECENT
+                  Messages that have the \Recent flag set.
+                 */
+
+                $search_conditions->additional_joins = array();
+
+                if (!$is_not) {
+                    $search_conditions->additional_where_conditions = "dbmail_messages.recent_flag = 1";
+                } else {
+                    $search_conditions->additional_where_conditions = "dbmail_messages.recent_flag <> 1";
+                }
+
+                /*
+                 * Unset managed items
+                 */
+                $items = array_slice($items, 1);
+
+                break;
+            case 'SEEN':
+
+                /*
+                  SEEN
+                  Messages that have the \Seen flag set.
+                 */
+
+                $search_conditions->additional_joins = array();
+
+                if (!$is_not) {
+                    $search_conditions->additional_where_conditions = "dbmail_messages.seen_flag = 1";
+                } else {
+                    $search_conditions->additional_where_conditions = "dbmail_messages.seen_flag <> 1";
+                }
+
+                /*
+                 * Unset managed items
+                 */
+                $items = array_slice($items, 1);
+
+                break;
+            case 'SENTBEFORE':
+
+                /*
+                  SENTBEFORE <date>
+                  Messages whose [RFC-2822] Date: header (disregarding time and
+                  timezone) is earlier than the specified date.
+                 */
+
+                if (!array_key_exists(1, $items)) {
+                    /*
+                     * Error - Missing parameters
+                     */
+                    return FALSE;
+                }
+
+                $header_name_id = $this->get_header_id_by_header_name('date');
+                if (!$header_name_id) {
+                    /*
+                     * Missing lookup value - return empty string (this is NON an error!)
+                     */
+                    return array();
+                }
+
+                $unquoted_value = trim($items[1], '"');
+
+                $datetime_value = date_create_from_format('j-M-Y', $unquoted_value);
+                if (!$datetime_value) {
+                    /*
+                     * Malformed datetime
+                     */
+                    return FALSE;
+                }
+
+                /*
+                 * Set tables alias
+                 */
+                $sequence++;
+                $dbmail_header_alias = "dbmail_header_{$sequence}";
+
+                $sequence++;
+                $dbmail_headervalue_alias = "dbmail_headervalue_{$sequence}";
+
+                $search_conditions->additional_joins = array(
+                    "INNER JOIN dbmail_header AS {$dbmail_header_alias} ON dbmail_physmessage.id = {$dbmail_header_alias}.physmessage_id",
+                    "INNER JOIN dbmail_headervalue AS {$dbmail_headervalue_alias} ON {$dbmail_header_alias}.headervalue_id = {$dbmail_headervalue_alias}.id"
+                );
+
+                if (!$is_not) {
+                    $search_conditions->additional_where_conditions = "{$dbmail_header_alias}.headername_id = {$header_name_id} AND {$dbmail_headervalue_alias}.datefield < '{$datetime_value->format('Y-m-d')} 00:00:00'";
+                } else {
+                    $search_conditions->additional_where_conditions = "{$dbmail_header_alias}.headername_id = {$header_name_id} AND {$dbmail_headervalue_alias}.datefield >= '{$datetime_value->format('Y-m-d')} 00:00:00'";
+                }
+
+                /*
+                 * Unset managed items
+                 */
+                $items = array_slice($items, 2);
+
+                break;
+            case 'SENTON':
+
+                /*
+                  SENTON <date>
+                  Messages whose [RFC-2822] Date: header (disregarding time and
+                  timezone) is within the specified date.
+                 */
+
+                if (!array_key_exists(1, $items)) {
+                    /*
+                     * Error - Missing parameters
+                     */
+                    return FALSE;
+                }
+
+                $header_name_id = $this->get_header_id_by_header_name('date');
+                if (!$header_name_id) {
+                    /*
+                     * Missing lookup value - return empty string (this is NON an error!)
+                     */
+                    return array();
+                }
+
+                $unquoted_value = trim($items[1], '"');
+
+                $datetime_value = date_create_from_format('j-M-Y', $unquoted_value);
+                if (!$datetime_value) {
+                    /*
+                     * Malformed datetime
+                     */
+                    return FALSE;
+                }
+
+                /*
+                 * Set tables alias
+                 */
+                $sequence++;
+                $dbmail_header_alias = "dbmail_header_{$sequence}";
+
+                $sequence++;
+                $dbmail_headervalue_alias = "dbmail_headervalue_{$sequence}";
+
+                $search_conditions->additional_joins = array(
+                    "INNER JOIN dbmail_header AS {$dbmail_header_alias} ON dbmail_physmessage.id = {$dbmail_header_alias}.physmessage_id",
+                    "INNER JOIN dbmail_headervalue AS {$dbmail_headervalue_alias} ON {$dbmail_header_alias}.headervalue_id = {$dbmail_headervalue_alias}.id"
+                );
+
+                if (!$is_not) {
+                    $search_conditions->additional_where_conditions = "{$dbmail_header_alias}.headername_id = {$header_name_id} AND {$dbmail_headervalue_alias}.datefield = '{$datetime_value->format('Y-m-d')} 00:00:00'";
+                } else {
+                    $search_conditions->additional_where_conditions = "{$dbmail_header_alias}.headername_id = {$header_name_id} AND {$dbmail_headervalue_alias}.datefield <> '{$datetime_value->format('Y-m-d')} 00:00:00'";
+                }
+
+                /*
+                 * Unset managed items
+                 */
+                $items = array_slice($items, 2);
+                break;
+            case 'SENTSINCE':
+
+                /*
+                  SENTSINCE <date>
+                  Messages whose [RFC-2822] Date: header (disregarding time and
+                  timezone) is within or later than the specified date.
+                 */
+
+                if (!array_key_exists(1, $items)) {
+                    /*
+                     * Error - Missing parameters
+                     */
+                    return FALSE;
+                }
+
+                $header_name_id = $this->get_header_id_by_header_name('date');
+                if (!$header_name_id) {
+                    /*
+                     * Missing lookup value - return empty string (this is NON an error!)
+                     */
+                    return array();
+                }
+
+                $unquoted_value = trim($items[1], '"');
+
+                $datetime_value = date_create_from_format('j-M-Y', $unquoted_value);
+                if (!$datetime_value) {
+                    /*
+                     * Malformed datetime
+                     */
+                    return FALSE;
+                }
+
+                /*
+                 * Set tables alias
+                 */
+                $sequence++;
+                $dbmail_header_alias = "dbmail_header_{$sequence}";
+
+                $sequence++;
+                $dbmail_headervalue_alias = "dbmail_headervalue_{$sequence}";
+
+                $search_conditions->additional_joins = array(
+                    "INNER JOIN dbmail_header AS {$dbmail_header_alias} ON dbmail_physmessage.id = {$dbmail_header_alias}.physmessage_id",
+                    "INNER JOIN dbmail_headervalue AS {$dbmail_headervalue_alias} ON {$dbmail_header_alias}.headervalue_id = {$dbmail_headervalue_alias}.id"
+                );
+
+                if (!$is_not) {
+                    $search_conditions->additional_where_conditions = "{$dbmail_header_alias}.headername_id = {$header_name_id} AND {$dbmail_headervalue_alias}.datefield >= '{$datetime_value->format('Y-m-d')} 00:00:00'";
+                } else {
+                    $search_conditions->additional_where_conditions = "{$dbmail_header_alias}.headername_id = {$header_name_id} AND {$dbmail_headervalue_alias}.datefield < '{$datetime_value->format('Y-m-d')} 00:00:00'";
+                }
+
+                /*
+                 * Unset managed items
+                 */
+                $items = array_slice($items, 2);
+                break;
+            case 'SINCE':
+
+                /*
+                  SINCE <date>
+                  Messages whose internal date (disregarding time and timezone)
+                  is within or later than the specified date.
+                 */
+
+                if (!array_key_exists(1, $items)) {
+                    /*
+                     * Error - Missing parameters
+                     */
+                    return FALSE;
+                }
+
+                $unquoted_value = trim($items[1], '"');
+
+                $datetime_value = date_create_from_format('j-M-Y', $unquoted_value);
+                if (!$datetime_value) {
+                    /*
+                     * Malformed datetime
+                     */
+                    return FALSE;
+                }
+
+                $search_conditions->additional_joins = array();
+
+                if (!$is_not) {
+                    $search_conditions->additional_where_conditions = "dbmail_physmessage.internal_date => '{$datetime_value->format('Y-m-d')} 00:00:00'";
+                } else {
+                    $search_conditions->additional_where_conditions = "dbmail_physmessage.internal_date < '{$datetime_value->format('Y-m-d')} 00:00:00'";
+                }
+
+                /*
+                 * Unset managed items
+                 */
+                $items = array_slice($items, 2);
+
+                break;
+            case 'SMALLER':
+
+                /*
+                  SMALLER <n>
+                  Messages with an [RFC-2822] size smaller than the specified
+                  number of octets.
+                 */
+
+                if (!array_key_exists(1, $items)) {
+                    /*
+                     * Error - Missing parameters
+                     */
+                    return FALSE;
+                }
+
+                $unquoted_value = trim($items[1], '"');
+
+                $search_conditions->additional_joins = array();
+
+                if (!$is_not) {
+                    $search_conditions->additional_where_conditions = "dbmail_physmessage.rfcsize < '{$this->dbmail->escape($unquoted_value)}'";
+                } else {
+                    $search_conditions->additional_where_conditions = "dbmail_physmessage.rfcsize >= '{$this->dbmail->escape($unquoted_value)}'";
+                }
+
+                /*
+                 * Unset managed items
+                 */
+                $items = array_slice($items, 2);
+
+                break;
+            case 'SUBJECT':
+
+                /*
+                  SUBJECT <string>
+                  Messages that contain the specified string in the envelope
+                  structure's SUBJECT field.
+                 */
+
+                if (!array_key_exists(1, $items)) {
+                    /*
+                     * Error - Missing parameters
+                     */
+                    return FALSE;
+                }
+
+                $header_name_id = $this->get_header_id_by_header_name('subject');
+                if (!$header_name_id) {
+                    /*
+                     * Missing lookup value - return empty string (this is NON an error!)
+                     */
+                    return array();
+                }
+
+                $unquoted_value = trim($items[1], '"');
+
+                /*
+                 * Set tables alias
+                 */
+                $sequence++;
+                $dbmail_header_alias = "dbmail_header_{$sequence}";
+
+                $sequence++;
+                $dbmail_headervalue_alias = "dbmail_headervalue_{$sequence}";
+
+                $search_conditions->additional_joins = array(
+                    "INNER JOIN dbmail_header AS {$dbmail_header_alias} ON dbmail_physmessage.id = {$dbmail_header_alias}.physmessage_id",
+                    "INNER JOIN dbmail_headervalue AS {$dbmail_headervalue_alias} ON {$dbmail_header_alias}.headervalue_id = {$dbmail_headervalue_alias}.id"
+                );
+
+                if (!$is_not) {
+                    $search_conditions->additional_where_conditions = "{$dbmail_header_alias}.headername_id = {$header_name_id} AND {$dbmail_headervalue_alias}.headervalue LIKE '%{$this->dbmail->escape($unquoted_value)}%'";
+                } else {
+                    $search_conditions->additional_where_conditions = "{$dbmail_header_alias}.headername_id = {$header_name_id} AND {$dbmail_headervalue_alias}.headervalue NOT LIKE '%{$this->dbmail->escape($unquoted_value)}%'";
+                }
+
+                /*
+                 * Unset managed items
+                 */
+                $items = array_slice($items, 2);
+                break;
+            case 'TEXT':
+
+                /*
+                  TEXT <string>
+                  Messages that contain the specified string in the header or
+                  body of the message.
+                 */
+
+                if (!array_key_exists(1, $items)) {
+                    /*
+                     * Error - Missing parameters
+                     */
+                    return FALSE;
+                }
+
+                $unquoted_value = trim($items[1], '"');
+
+
+                /*
+                 * Set tables alias
+                 */
+                $sequence++;
+                $dbmail_partlists_alias = "dbmail_partlists_{$sequence}";
+
+                $sequence++;
+                $dbmail_mimeparts_alias = "dbmail_mimeparts_{$sequence}";
+
+                $search_conditions->additional_joins = array(
+                    "INNER JOIN dbmail_partlists AS {$dbmail_partlists_alias} ON dbmail_physmessage.id = {$dbmail_partlists_alias}.physmessage_id",
+                    "INNER JOIN dbmail_mimeparts AS {$dbmail_mimeparts_alias} ON {$dbmail_partlists_alias}.part_id = {$dbmail_mimeparts_alias}.id"
+                );
+
+                if (!$is_not) {
+                    $search_conditions->additional_where_conditions = "{$dbmail_mimeparts_alias}.data LIKE '%{$this->dbmail->escape($unquoted_value)}%'";
+                } else {
+                    $search_conditions->additional_where_conditions = "{$dbmail_mimeparts_alias}.data NOT LIKE '%{$this->dbmail->escape($unquoted_value)}%'";
+                }
+
+                /*
+                 * Unset managed items
+                 */
+                $items = array_slice($items, 2);
+
+                break;
+            case 'TO':
+
+                /*
+                  TO <string>
+                  Messages that contain the specified string in the envelope
+                  structure's TO field.
+                 */
+
+                if (!array_key_exists(1, $items)) {
+                    /*
+                     * Error - Missing parameters
+                     */
+                    return FALSE;
+                }
+
+                $header_name_id = $this->get_header_id_by_header_name('to');
+                if (!$header_name_id) {
+                    /*
+                     * Missing lookup value - return empty string (this is NON an error!)
+                     */
+                    return array();
+                }
+
+                $unquoted_value = trim($items[1], '"');
+
+                /*
+                 * Set tables alias
+                 */
+                $sequence++;
+                $dbmail_header_alias = "dbmail_header_{$sequence}";
+
+                $sequence++;
+                $dbmail_headervalue_alias = "dbmail_headervalue_{$sequence}";
+
+                $search_conditions->additional_joins = array(
+                    "INNER JOIN dbmail_header AS {$dbmail_header_alias} ON dbmail_physmessage.id = {$dbmail_header_alias}.physmessage_id",
+                    "INNER JOIN dbmail_headervalue AS {$dbmail_headervalue_alias} ON {$dbmail_header_alias}.headervalue_id = {$dbmail_headervalue_alias}.id"
+                );
+
+                if (!$is_not) {
+                    $search_conditions->additional_where_conditions = "{$dbmail_header_alias}.headername_id = {$header_name_id} AND {$dbmail_headervalue_alias}.headervalue LIKE '%{$this->dbmail->escape($unquoted_value)}%'";
+                } else {
+                    $search_conditions->additional_where_conditions = "{$dbmail_header_alias}.headername_id = {$header_name_id} AND {$dbmail_headervalue_alias}.headervalue NOT LIKE '%{$this->dbmail->escape($unquoted_value)}%'";
+                }
+
+                /*
+                 * Unset managed items
+                 */
+                $items = array_slice($items, 2);
+
+                break;
+            case 'UID':
+
+                /*
+                  UID <sequence set>
+                  Messages with unique identifiers corresponding to the specified
+                  unique identifier set.  Sequence set ranges are permitted.
+                 */
+                if (!array_key_exists(1, $items)) {
+                    /*
+                     * Error - Missing parameters
+                     */
+                    return FALSE;
+                }
+
+                $unquoted_value = trim($items[1], '"');
+
+                $search_conditions->additional_joins = array();
+
+                if (!$is_not) {
+                    $search_conditions->additional_where_conditions = "dbmail_messages.unique_id = '{$this->dbmail->escape($unquoted_value)}'";
+                } else {
+                    $search_conditions->additional_where_conditions = "dbmail_messages.unique_id <> '{$this->dbmail->escape($unquoted_value)}'";
+                }
+
+                /*
+                 * Unset managed items
+                 */
+                $items = array_slice($items, 2);
+
+                break;
+            case 'UNANSWERED':
+
+                /*
+                  UNANSWERED
+                  Messages that do not have the \Answered flag set.
+                 */
+
+                $search_conditions->additional_joins = array();
+
+                if (!$is_not) {
+                    $search_conditions->additional_where_conditions = "dbmail_messages.answered_flag = 0";
+                } else {
+                    $search_conditions->additional_where_conditions = "dbmail_messages.answered_flag <> 0";
+                }
+
+                /*
+                 * Unset managed items
+                 */
+                $items = array_slice($items, 1);
+
+                break;
+            case 'UNDELETED':
+
+                /*
+                  UNDELETED
+                  Messages that do not have the \Deleted flag set.
+                 */
+
+                $search_conditions->additional_joins = array();
+
+                if (!$is_not) {
+                    $search_conditions->additional_where_conditions = "dbmail_messages.deleted_flag = 0";
+                } else {
+                    $search_conditions->additional_where_conditions = "dbmail_messages.deleted_flag <> 0";
+                }
+
+                /*
+                 * Unset managed items
+                 */
+                $items = array_slice($items, 1);
+
+                break;
+            case 'UNDRAFT':
+
+                /*
+                  UNDRAFT
+                  Messages that do not have the \Draft flag set.
+                 */
+
+                $search_conditions->additional_joins = array();
+
+                if (!$is_not) {
+                    $search_conditions->additional_where_conditions = "dbmail_messages.draft_flag = 0";
+                } else {
+                    $search_conditions->additional_where_conditions = "dbmail_messages.draft_flag <> 0";
+                }
+
+                /*
+                 * Unset managed items
+                 */
+                $items = array_slice($items, 1);
+
+                break;
+            case 'UNFLAGGED':
+
+                /*
+                  UNFLAGGED
+                  Messages that do not have the \Flagged flag set.
+                 */
+
+                $search_conditions->additional_joins = array();
+
+                if (!$is_not) {
+                    $search_conditions->additional_where_conditions = "dbmail_messages.flagged_flag = 0";
+                } else {
+                    $search_conditions->additional_where_conditions = "dbmail_messages.flagged_flag <> 0";
+                }
+
+                /*
+                 * Unset managed items
+                 */
+                $items = array_slice($items, 1);
+
+                break;
+            case 'UNKEYWORD':
+
+                /*
+                  UNKEYWORD <flag>
+                  Messages that do not have the specified keyword flag set.
+                 */
+
+                if (!array_key_exists(1, $items)) {
+                    /*
+                     * Error - Missing parameters
+                     */
+                    return FALSE;
+                }
+
+                $unquoted_value = trim($items[1], '"');
+
+                /*
+                 * Set tables alias
+                 */
+                $sequence++;
+                $dbmail_keywords_alias = "dbmail_keywords{$sequence}";
+
+                $search_conditions->additional_joins = array(
+                    "LEFT JOIN dbmail_keywords AS {$dbmail_keywords_alias} on dbmail_messages.message_idnr = {$dbmail_keywords_alias}.message_idnr AND {$dbmail_keywords_alias}.keyword = '{$this->dbmail->escape($unquoted_value)}'"
+                );
+
+                if (!$is_not) {
+                    $search_conditions->additional_where_conditions = "{$dbmail_keywords_alias}.message_idnr IS NULL";
+                } else {
+                    $search_conditions->additional_where_conditions = "{$dbmail_keywords_alias}.message_idnr IS NOT NULL";
+                }
+
+                /*
+                 * Unset managed items
+                 */
+                $items = array_slice($items, 2);
+
+                break;
+            case 'UNSEEN':
+
+                /*
+                  UNSEEN
+                  Messages that do not have the \Seen flag set.
+                 */
+
+                $search_conditions->additional_joins = array();
+
+                if (!$is_not) {
+                    $search_conditions->additional_where_conditions = "dbmail_messages.seen_flag = 0";
+                } else {
+                    $search_conditions->additional_where_conditions = "dbmail_messages.seen_flag <> 0";
+                }
+
+                /*
+                 * Unset managed items
+                 */
+                $items = array_slice($items, 1);
+
+                break;
+            default:
+
+                /*
+                 * Invalid operand!
+                 */
+                console('_apply_search_parameters - Invalid operand!');
+
+                return FALSE;
+        }
+
+
+        /*
+         * Reorder items array
+         */
+        $items = array_values($items);
+
+
+        return $search_conditions;
     }
 
 }
