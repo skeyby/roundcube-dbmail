@@ -642,37 +642,68 @@ class rcube_dbmail extends rcube_storage {
     /**
      * Get messages count for a specific folder.
      *
-     * @param  string  $folder  Folder name
-     * @param  string  $mode    Mode for count [ALL|THREADS|UNSEEN|RECENT|EXISTS]
-     * @param  boolean $force   Force reading from server and update cache
-     * @param  boolean $status  Enables storing folder status info (max UID/count),
-     *                          required for folder_status()
+     * @param  mixed   $folder      Folders list
+     * @param  string  $mode        Mode for count [ALL|THREADS|UNSEEN|RECENT|EXISTS]
+     * @param  boolean $force       Force reading from server and update cache
+     * @param  boolean $status      Enables storing folder status info (max UID/count),
+     *                              required for folder_status()
      *
      * @return int     Number of messages
      */
     public function count($folder = null, $mode = 'ALL', $force = false, $status = true) {
 
-        if (strlen($folder) == 0) {
-            $folder = $this->folder;
+        /**
+         * Some actions (eg. roundcube/program/steps/mail/move_del.inc) call this 
+         * method twice to retrieve messages count before and after doing stuff:
+         * 
+         * $old_count = $RCMAIL->storage->count(NULL, $threading ? 'THREADS' : 'ALL');
+         * $msg_count = $RCMAIL->storage->count(NULL, $threading ? 'THREADS' : 'ALL');
+         * 
+         * So we can't cache results or the second call will not get fresh data ('$force' flag is not supplied)
+         */
+        if (is_array($folder) && count($folder) > 0) {
+            // mailboxes list supplied
+            $target = $folder;
+        } elseif (is_string($folder) && strlen($folder) > 0) {
+            // single mailbox supplied
+            $target = array($folder);
+        } elseif (array_key_exists('search_scope', $_SESSION) && $_SESSION['search_scope'] == 'all') {
+            // no mailbox supplied, search within all mailboxes
+            $target = $this->list_folders_subscribed('', '*', 'mail', null, true);
+        } else if (array_key_exists('search_scope', $_SESSION) && $_SESSION['search_scope'] == 'sub') {
+            // no mailbox supplied, search within current mailbox and nested ones
+            $target = $this->list_folders_subscribed($this->folder, '*', 'mail');
+        } elseif (strlen($this->folder) > 0) {
+            $target = array($this->folder);
         }
 
-        /**
-         *  mailbox exists?
-         */
-        $mailbox_idnr = $this->get_mail_box_id($folder);
-        if (!$mailbox_idnr) {
-            return FALSE;
+        if (!is_array($target) || count($target) == 0) {
+            // empty set!!!
+            return 0;
         }
 
-        /**
-         *  ACLs check ('lookup' and 'read' grants required )
-         */
-        $ACLs = $this->_get_acl(NULL, $mailbox_idnr);
-        if (!is_array($ACLs) || !in_array(self::ACL_LOOKUP_FLAG, $ACLs) || !in_array(self::ACL_READ_FLAG, $ACLs)) {
-            /**
-             *  Unauthorized!
-             */
-            return FALSE;
+        $folders = $this->_format_folders_list($target);
+
+        // map mailboxes ID
+        $mailboxes = array();
+        foreach ($folders as $folder_name) {
+
+            // Retrieve mailbox ID
+            $mail_box_idnr = $this->get_mail_box_id($folder_name);
+            if (!$mail_box_idnr) {
+                // Not found - Skip!
+                return FALSE;
+            }
+
+            // ACLs check ('lookup' and 'read' grants required )
+            $ACLs = $this->_get_acl(NULL, $mail_box_idnr);
+            if (!is_array($ACLs) || !in_array(self::ACL_LOOKUP_FLAG, $ACLs) || !in_array(self::ACL_READ_FLAG, $ACLs)) {
+                // Unauthorized - Skip!
+                return FALSE;
+            }
+
+            // Add mailbox ID to mailboxes list
+            $mailboxes[$mail_box_idnr] = $folder_name;
         }
 
         /*
@@ -704,7 +735,7 @@ class rcube_dbmail extends rcube_storage {
         /*
          * Set base 'where' conditions
          */
-        $where_conditions = " WHERE dbmail_messages.mailbox_idnr = {$this->dbmail->escape($mailbox_idnr)} ";
+        $where_conditions = " WHERE dbmail_messages.mailbox_idnr IN (" . implode(",", array_keys($mailboxes)) . ")";
         $where_conditions .= " AND dbmail_messages.status < " . self::MESSAGE_STATUS_DELETE . " ";
 
         /*
@@ -731,20 +762,15 @@ class rcube_dbmail extends rcube_storage {
         }
 
         /*
-         * Set 'distinct' clause when additional joins are needed
-         */
-        $distinct_clause = (strlen($additional_joins) > 0 ? 'DISTINCT' : '');
-
-        /*
          * Prepare base query
          */
-        $query = " SELECT COUNT({$distinct_clause} dbmail_messages.message_idnr) AS items_count "
+        $query = " SELECT mailbox_idnr, dbmail_messages.message_idnr "
                 . " FROM dbmail_messages ";
 
         /*
-         * Join to dbmail_physmessage when $additional_joins supplied 
+         * Join to dbmail_physmessage when needed 
          */
-        if (strlen($additional_joins) > 0) {
+        if (isset($search_conditions->needs_physmessages) && $search_conditions->needs_physmessages) {
             $query .= " INNER JOIN dbmail_physmessage ON dbmail_messages.physmessage_id = dbmail_physmessage.id ";
         }
 
@@ -752,39 +778,44 @@ class rcube_dbmail extends rcube_storage {
         $query .= " {$where_conditions} ";
 
         /*
-         * Before executing query (and if '$force' == FALSE), try to get a temporary content (if exists)
-         */
-        $temp_key = "METHOD_COUNT_" . md5($query);
-
-        $temp_contents = $this->get_temp_value($temp_key);
-        if (!$force && $temp_contents) {
-            return $temp_contents;
-        }
-
-        /*
          * Execute query
          */
         $res = $this->dbmail->query($query);
-        $row = $this->dbmail->fetch_assoc($res);
-
-        $items_count = ($row['items_count'] > 0 ? $row['items_count'] : 0);
 
         /*
-         * Save query output within temporary contents
-         * 
-         * DON'T USE A LONG TTL HERE!!!!!!!!!!
+         * Retrieve full messages count and folder specific messages count
          */
-        $this->set_temp_value($temp_key, $items_count, 30);
+        $total_messages = 0;
+        $mailbox_messages = array();
+        while ($row = $this->dbmail->fetch_assoc($res)) {
+
+            $mailbox_name = $mailboxes[$row['mailbox_idnr']];
+            $message_idnr = $row['message_idnr'];
+
+            if (!array_key_exists($mailbox_name, $mailbox_messages)) {
+                $mailbox_messages[$mailbox_name] = array();
+            }
+
+            if (!in_array($message_idnr, $mailbox_messages[$mailbox_name])) {
+                $total_messages++;
+                $mailbox_messages[$mailbox_name][] = $message_idnr;
+            }
+        }
 
         /*
          *  Cache messages count and latest message id
          */
         if ($mode == 'ALL' && $status) {
-            $this->set_folder_stats($folder, 'cnt', $items_count);
-            $this->set_folder_stats($folder, 'maxuid', ($items_count ? $this->get_latest_message_idnr($folder) : 0));
+            foreach ($mailbox_messages as $mailbox_name => $messages) {
+
+                $mailbox_messages_count = count($messages);
+
+                $this->set_folder_stats($mailbox_name, 'cnt', $mailbox_messages_count);
+                $this->set_folder_stats($mailbox_name, 'maxuid', ($mailbox_messages_count ? $this->get_latest_message_idnr($mailbox_name) : 0));
+            }
         }
 
-        return $items_count;
+        return $total_messages;
     }
 
     /**
@@ -872,15 +903,16 @@ class rcube_dbmail extends rcube_storage {
             return array();
         }
 
-        $query = " SELECT seen_flag, answered_flag, deleted_flag, flagged_flag, recent_flag, draft_flag "
+        $query = " SELECT message_idnr, seen_flag, answered_flag, deleted_flag, flagged_flag, recent_flag, draft_flag "
                 . " FROM dbmail_messages "
                 . " WHERE " . implode(" AND ", $filters);
 
         $res = $this->dbmail->query($query);
 
+        $result = array();
         while ($row = $this->dbmail->fetch_assoc($res)) {
 
-            $result[$uid] = array(
+            $result[$row['message_idnr']] = array(
                 'seen' => ($row['seen_flag'] ? TRUE : FALSE),
                 'answered' => ($row['answered_flag'] ? TRUE : FALSE),
                 'deleted' => ($row['deleted_flag'] ? TRUE : FALSE),
@@ -896,7 +928,7 @@ class rcube_dbmail extends rcube_storage {
     /**
      * Public method for listing headers.
      *
-     * @param   string   $folder     Folder name
+     * @param   mixed    $folder     Folders list
      * @param   int      $page       Current page to list
      * @param   string   $sort_field Header field to sort by
      * @param   string   $sort_order Sort order [ASC|DESC]
@@ -906,7 +938,28 @@ class rcube_dbmail extends rcube_storage {
      */
     public function list_messages($folder = null, $page = null, $sort_field = null, $sort_order = null, $slice = 0) {
 
-        $folders = $this->_format_folders_list($folder);
+        $target = array();
+
+        if (is_array($folder) && count($folder) > 0) {
+            // mailboxes list supplied
+            $target = $folder;
+        } elseif (is_string($folder) && strlen($folder) > 0) {
+            // single mailbox supplied
+            $target = array($folder);
+        } elseif (array_key_exists('search_scope', $_SESSION) && $_SESSION['search_scope'] == 'all') {
+            // no mailbox supplied, search within all mailboxes
+            $target = $this->list_folders_subscribed('', '*', 'mail', null, true);
+        } else if (array_key_exists('search_scope', $_SESSION) && $_SESSION['search_scope'] == 'sub') {
+            // no mailbox supplied, search within current mailbox and nested ones
+            $target = $this->list_folders_subscribed($this->folder, '*', 'mail');
+        }
+
+        if (!is_array($target) || count($target) == 0) {
+            // empty set!!!
+            return array();
+        }
+
+        $folders = $this->_format_folders_list($target);
 
         $search_str = isset($this->search_set[0]) ? $this->search_set[0] : '';
 
@@ -916,9 +969,9 @@ class rcube_dbmail extends rcube_storage {
     /**
      * Return sorted list of message UIDs
      *
-     * @param string $folder     Folder to get index from
-     * @param string $sort_field Sort column
-     * @param string $sort_order Sort order [ASC, DESC]
+     * @param mixed     $folder     Folders list to get index from
+     * @param string    $sort_field Sort column
+     * @param string    $sort_order Sort order [ASC, DESC]
      *
      * @return rcube_result_index|rcube_result_thread List of messages (UIDs)
      */
@@ -941,7 +994,7 @@ class rcube_dbmail extends rcube_storage {
     /**
      * Invoke search request to the server.
      *
-     * @param  string  $folder     Folder name to search in
+     * @param  mixed   $folder     Folders list to search in
      * @param  string  $str        Search criteria
      * @param  string  $charset    Search charset
      * @param  string  $sort_field Header field to sort by
@@ -950,21 +1003,13 @@ class rcube_dbmail extends rcube_storage {
      */
     public function search($folder = null, $str = 'ALL', $charset = null, $sort_field = null) {
 
-        $folders = $this->_format_folders_list($folder);
-
         /*
-         * ACL checks implemented within '_list_messages()'
+         * Here we only init rcube_result_index instance, no need to execute search (done within list_messages() method)
          */
 
-        // get messages list
-        $messages = $this->_list_messages($folders, 0, $sort_field, 'ASC', 0, $str);
+        $folders = $this->_format_folders_list($folder);
 
-        $result_index_str = "";
-        foreach ($messages as $message) {
-            $result_index_str .= " {$message->uid}";
-        }
-
-        $index = new rcube_result_index($folders, "* SORT {$result_index_str}");
+        $index = new rcube_result_index($folders, NULL);
 
         $this->search_set = array(
             $str,
@@ -977,28 +1022,20 @@ class rcube_dbmail extends rcube_storage {
     /**
      * Direct (real and simple) search request (without result sorting and caching).
      *
-     * @param  string  $folder  Folder name to search in
-     * @param  string  $str     Search string
+     * @param  mixed    $folder     Folders list to search in
+     * @param  string   $str        Search string
      *
      * @return rcube_result_index  Search result (UIDs)
      */
     public function search_once($folder = null, $str = 'ALL') {
 
-        $folders = $this->_format_folders_list($folder);
-
         /*
-         * ACL checks implemented within '_list_messages()'
+         * Here we only init rcube_result_index instance, no need to execute search (done within list_messages() method)
          */
 
-        // get messages list
-        $messages = $this->_list_messages($folders, 0, NULL, 'ASC', 0, $str);
+        $folders = $this->_format_folders_list($folder);
 
-        $result_index_str = "";
-        foreach ($messages as $message) {
-            $result_index_str .= " {$message->uid}";
-        }
-
-        $index = new rcube_result_index($folder, "* SORT {$result_index_str}");
+        $index = new rcube_result_index($folders, NULL);
 
         $this->search_set = array(
             $str,
@@ -1058,7 +1095,7 @@ class rcube_dbmail extends rcube_storage {
             return FALSE;
         }
 
-        return $this->retrieve_message($uid);
+        return $this->retrieve_message($uid, $folder);
     }
 
     /**
@@ -1090,7 +1127,7 @@ class rcube_dbmail extends rcube_storage {
             return FALSE;
         }
 
-        return $this->retrieve_message($uid);
+        return $this->retrieve_message($uid, $folder);
     }
 
     /**
@@ -2639,7 +2676,13 @@ class rcube_dbmail extends rcube_storage {
      */
     public function folder_info($folder) {
 
-        $folder_cached = $this->get_cache("FOLDER_" . $folder);
+        /*
+         *  folder name could be too long to be used as cache key, so we hash it 
+         * to prevent "Data too long for column 'cache_key'" issues
+         */
+        $cache_key = "FOLDER_" . md5($folder);
+
+        $folder_cached = $this->get_cache($cache_key);
         if (is_object($folder_cached)) {
             return $folder_cached;
         }
@@ -2658,7 +2701,7 @@ class rcube_dbmail extends rcube_storage {
             'norename' => (in_array(self::ACL_DELETE_FLAG, $folderRights) ? FALSE : TRUE)
         );
 
-        $this->update_cache("FOLDER_" . $folder, $options);
+        $this->update_cache($cache_key, $options);
 
         return $options;
     }
@@ -4101,11 +4144,12 @@ class rcube_dbmail extends rcube_storage {
      * when called from _list_messages).
      * 
      * @param int $message_idnr
+     * @param string $folder
      * @param array $message_data 
      * @param boolean $getBody whenever to retrieve body content too (instead of headers only)
      * @return mixed
      */
-    private function retrieve_message($message_idnr, $message_data = FALSE, $getBody = TRUE) {
+    private function retrieve_message($message_idnr, $folder, $message_data = FALSE, $getBody = TRUE) {
 
         /*
          * Get cached contents
@@ -4132,6 +4176,7 @@ class rcube_dbmail extends rcube_storage {
                 $rcmh_cached->flags["DELETED"] = ($message_data['deleted_flag'] == 1 ? TRUE : FALSE);
                 $rcmh_cached->flags["FLAGGED"] = ($message_data['flagged_flag'] == 1 ? TRUE : FALSE);
                 $rcmh_cached->flags["FORWARDED"] = $this->get_keyword($message_idnr, self::KEYWORD_FORWARDED);
+                $rcmh_cached->flags["SKIP_MBOX_CHECK"] = TRUE;
             }
 
             return $rcmh_cached;
@@ -4152,15 +4197,6 @@ class rcube_dbmail extends rcube_storage {
             }
 
             /*
-             * Get folder properties
-             */
-            $folder_record = $this->get_folder_record($message_record['mailbox_idnr']);
-            if (!$folder_record) {
-                // Not found!
-                return FALSE;
-            }
-
-            /*
              * Ok - prepare message data array
              */
             $message_data = array(
@@ -4173,7 +4209,7 @@ class rcube_dbmail extends rcube_storage {
                 'deleted_flag' => $message_record["deleted_flag"],
                 'flagged_flag' => $message_record["flagged_flag"],
                 'folder_record' => array(
-                    'name' => $folder_record['name']
+                    'name' => $folder
                 ),
                 'mailbox_idnr' => $message_record['mailbox_idnr']
             );
@@ -4207,6 +4243,7 @@ class rcube_dbmail extends rcube_storage {
         $rcmh->flags["ANSWERED"] = ($message_data['answered_flag'] == 1 ? TRUE : FALSE);
         $rcmh->flags["DELETED"] = ($message_data['deleted_flag'] == 1 ? TRUE : FALSE);
         $rcmh->flags["FLAGGED"] = ($message_data['flagged_flag'] == 1 ? TRUE : FALSE);
+        $rcmh->flags["SKIP_MBOX_CHECK"] = TRUE;
 
         if ($getBody) {
 
@@ -4647,8 +4684,8 @@ class rcube_dbmail extends rcube_storage {
             return FALSE;
         }
 
-        // extract folders id
-        $mail_box_idnr_list = array();
+        // map mailboxes ID
+        $mailboxes = array();
         foreach ($folders as $folder_name) {
 
             // Retrieve mailbox ID
@@ -4666,13 +4703,14 @@ class rcube_dbmail extends rcube_storage {
             }
 
             // Add mailbox ID to mailboxes list
-            $mail_box_idnr_list[] = $mail_box_idnr;
+            $mailboxes[$mail_box_idnr] = $folder_name;
         }
 
         /*
-         * Init additional join tables list
+         * Init additional join tables list (sort / filters)
          */
-        $additional_joins = "";
+        $additional_sort_joins = "";
+        $additional_filter_joins = "";
 
         /*
          * Format search string
@@ -4698,14 +4736,14 @@ class rcube_dbmail extends rcube_storage {
          * "Base Condition" is that the message should not be EXPUNGED (thus DELETED) and within target mailboxes
          */
         $where_conditions = " WHERE dbmail_messages.status < " . self::MESSAGE_STATUS_DELETE;
-        $where_conditions .= " AND dbmail_messages.mailbox_idnr IN (" . implode(",", $mail_box_idnr_list) . ")";
+        $where_conditions .= " AND dbmail_messages.mailbox_idnr IN (" . implode(",", array_keys($mailboxes)) . ")";
 
         /*
          * Apply search criteria
          */
         if (isset($search_conditions->additional_where_conditions) && strlen($search_conditions->additional_where_conditions) > 0) {
             $where_conditions .= " AND {$search_conditions->additional_where_conditions}";
-            $additional_joins .= implode(PHP_EOL, $search_conditions->additional_joins);
+            $additional_filter_joins .= implode(PHP_EOL, $search_conditions->additional_joins);
         }
 
         /*
@@ -4730,17 +4768,22 @@ class rcube_dbmail extends rcube_storage {
                  */
                 $header_id = $this->get_header_id_by_header_name($sort_field);
 
-                $additional_joins .= " "
-                        . " LEFT JOIN dbmail_header AS sort_dbmail_header ON dbmail_physmessage.id = sort_dbmail_header.physmessage_id AND sort_dbmail_header.headername_id = {$this->dbmail->escape($header_id)} "
+                /*
+                 * target header could NOT be present, so we use left joins on headers tables
+                 */
+                $additional_sort_joins = " INNER JOIN dbmail_physmessage AS sort_dbmail_physmessage ON dbmail_messages.physmessage_id = sort_dbmail_physmessage.id "
+                        . " LEFT JOIN dbmail_header AS sort_dbmail_header ON sort_dbmail_physmessage.id = sort_dbmail_header.physmessage_id AND sort_dbmail_header.headername_id = {$this->dbmail->escape($header_id)} "
                         . " LEFT JOIN dbmail_headervalue AS sort_dbmail_headervalue ON sort_dbmail_header.headervalue_id = sort_dbmail_headervalue.id ";
 
                 $sort_condition = " ORDER BY sort_dbmail_headervalue.sortfield {$this->dbmail->escape($sort_order)} ";
                 break;
             case 'size':
                 /*
-                 *  'size' value is stored into 'dbmail_physmessage' table - no additional joins needed
+                 *  'size' value is stored into 'dbmail_physmessage' table
                  */
-                $sort_condition = " ORDER BY dbmail_physmessage.messagesize {$this->dbmail->escape($sort_order)} ";
+                $additional_sort_joins = " INNER JOIN dbmail_physmessage AS sort_dbmail_physmessage ON dbmail_messages.physmessage_id = sort_dbmail_physmessage.id ";
+
+                $sort_condition = " ORDER BY sort_dbmail_physmessage.messagesize {$this->dbmail->escape($sort_order)} ";
                 break;
             default:
                 /*
@@ -4756,28 +4799,33 @@ class rcube_dbmail extends rcube_storage {
         $limit_condition = " LIMIT {$this->dbmail->escape($query_offset)}, {$this->dbmail->escape($query_limit)} ";
 
         /*
-         * When no additional joins needed, avoid 'DISTINCT' clause
+         * When no additional joins needed, avoid 'DISTINCT' clause to speed up query execution
          */
-        $distinct_clause = (strlen($additional_joins) > 0 ? 'DISTINCT' : '');
+        $distinct_clause = (strlen($additional_filter_joins) > 0 ? 'DISTINCT' : '');
 
         /*
          *  Prepare base query
          */
-        $query = " SELECT $distinct_clause dbmail_messages.message_idnr, dbmail_messages.physmessage_id, "
-                . " dbmail_physmessage.messagesize, dbmail_messages.seen_flag, "
-                . " dbmail_messages.answered_flag, dbmail_messages.deleted_flag, "
-                . " dbmail_messages.flagged_flag, dbmail_messages.mailbox_idnr, "
-                . " dbmail_messages.unique_id "
+        $query = " SELECT $distinct_clause dbmail_messages.message_idnr, dbmail_messages.unique_id, "
+                . " dbmail_messages.physmessage_id, dbmail_messages.seen_flag, dbmail_messages.answered_flag, "
+                . " dbmail_messages.deleted_flag, dbmail_messages.flagged_flag, dbmail_messages.mailbox_idnr "
                 . " FROM dbmail_messages ";
 
         /*
-         * Join to dbmail_physmessage when $additional_joins supplied
+         * Apply sort joins when needed
          */
-        if (strlen($additional_joins) > 0) {
+        if (strlen($additional_sort_joins) > 0) {
+            $query .= " {$additional_sort_joins} ";
+        }
+
+        /*
+         * Join to dbmail_physmessage when needed 
+         */
+        if (isset($search_conditions->needs_physmessages) && $search_conditions->needs_physmessages) {
             $query .= " INNER JOIN dbmail_physmessage ON dbmail_messages.physmessage_id = dbmail_physmessage.id ";
         }
 
-        $query .= " {$additional_joins} ";
+        $query .= " {$additional_filter_joins} ";
         $query .= " {$where_conditions} ";
         $query .= " {$sort_condition} ";
         $query .= " {$limit_condition} ";
@@ -4788,22 +4836,34 @@ class rcube_dbmail extends rcube_storage {
         $msg_index = $query_offset++;
         while ($msg = $this->dbmail->fetch_assoc($res)) {
 
+            /*
+             * Get physmessage properties
+             */
+            $physmessage_record = $this->get_physmessage_record($msg["physmessage_id"]);
+            if (!$physmessage_record) {
+                // Not found!
+                return FALSE;
+            }
+
+            /*
+             * Ok - prepare message data array
+             */
             $message_data = array(
                 'message_idnr' => $msg["message_idnr"],
                 'unique_id' => $msg["unique_id"],
                 'physmessage_id' => $msg['physmessage_id'],
-                'message_size' => $msg["messagesize"],
+                'message_size' => $physmessage_record["messagesize"],
                 'seen_flag' => $msg["seen_flag"],
                 'answered_flag' => $msg["answered_flag"],
                 'deleted_flag' => $msg["deleted_flag"],
                 'flagged_flag' => $msg["flagged_flag"],
                 'folder_record' => array(
-                    'name' => $this->get_mail_box_name($msg["mailbox_idnr"])
+                    'name' => $mailboxes[$msg["mailbox_idnr"]]
                 ),
-                'mailbox_idnr' => $msg["mailbox_idnr"]
+                'mailbox_idnr' => $msg['mailbox_idnr']
             );
 
-            $headers[$msg_index] = $this->retrieve_message($msg["message_idnr"], $message_data, FALSE);
+            $headers[$msg_index] = $this->retrieve_message($msg["message_idnr"], $mailboxes[$msg["mailbox_idnr"]], $message_data, FALSE);
 
             $msg_index++;
         }
@@ -4884,7 +4944,7 @@ class rcube_dbmail extends rcube_storage {
 
         $result = $this->dbmail->query($query);
 
-        $mimeParts = [];
+        $mimeParts = array();
         while ($row = $this->dbmail->fetch_assoc($result)) {
             $mimeParts[] = $row;
         }
@@ -4899,7 +4959,7 @@ class rcube_dbmail extends rcube_storage {
         $prev_is_message = false;
         $is_message = false;
         $boundary = '';
-        $blist = [];
+        $blist = array();
         $index = 0;
         $header = '';
         $body = '';
@@ -5906,25 +5966,17 @@ class rcube_dbmail extends rcube_storage {
 
     private function _format_folders_list($folder) {
 
+        $folders = array();
+
         if (is_array($folder) && count($folder) > 0) {
-
-            $folders = array();
-
-            foreach ($folder as $folderName) {
-
-                $folderName = trim($folderName);
-
-                if (strlen($folderName) > 0) {
-                    $folders[] = $folderName;
-                }
-            }
-
-            return count($folders) > 0 ? $folders : array($this->folder);
+            $folders = $folder;
         } elseif (is_string($folder) && strlen(trim($folder)) > 0) {
-            return array(trim($folder));
+            $folders = array(trim($folder));
         } else {
-            return array($this->folder);
+            $folders = array($this->folder);
         }
+
+        return array_unique($folders);
     }
 
     /**
@@ -5950,6 +6002,7 @@ class rcube_dbmail extends rcube_storage {
         $search_conditions = new stdClass();
         $search_conditions->additional_joins = array();
         $search_conditions->additional_where_conditions = '';
+        $search_conditions->needs_physmessages = FALSE;
 
         if (strlen($search_string) == 0) {
             /*
@@ -6078,6 +6131,10 @@ class rcube_dbmail extends rcube_storage {
                     }
 
                     $segment_where_conditions[] = " ( {$sql_structure->additional_where_conditions} ) ";
+
+                    if ($sql_structure->needs_physmessages) {
+                        $search_conditions->needs_physmessages = TRUE;
+                    }
                 }
 
                 if (strlen($additional_where_conditions) > 0) {
@@ -6162,8 +6219,16 @@ class rcube_dbmail extends rcube_storage {
                 /*
                  * Opening quote found
                  */
-                $tokens[$token_index] .= $char;
                 $is_quoted = TRUE;
+                continue;
+            }
+
+            if ($is_quoted && $char == $escape_sign && $following_char == $arguments_delimiter) {
+
+                /*
+                 * Escaped sign found
+                 */
+                //$tokens[$token_index] .= $char;
                 continue;
             }
 
@@ -6176,18 +6241,18 @@ class rcube_dbmail extends rcube_storage {
                 continue;
             }
 
-            if ($is_quoted && $char == $arguments_delimiter && $previous_char != $escape_sign && $following_char == " ") {
+            if ($is_quoted && $char == $arguments_delimiter && $previous_char != $escape_sign) {
 
                 /*
                  * Closing quote found
                  */
-                $tokens[$token_index] .= $char;
                 $is_quoted = FALSE;
                 continue;
             }
 
-            if ($char != ' ') {
+            if ($char != ' ' || $is_quoted) {
                 /*
+                 * Whitespaces delimit tokens (only when not within quoted string).
                  * Push char into latest stack token
                  */
                 $tokens[$token_index] .= $char;
@@ -6202,6 +6267,16 @@ class rcube_dbmail extends rcube_storage {
         }
 
         return $tokens;
+    }
+
+    private function _cleanup_search_parameter($string = '') {
+
+        // remove leading / trailing double quotes 
+        if (strlen($string) > 2 && substr($string, 0) == '"' && substr($string, -1) == '"') {
+            $string = trim($string, '"');
+        }
+
+        return $string;
     }
 
     /**
@@ -6225,6 +6300,7 @@ class rcube_dbmail extends rcube_storage {
         $search_conditions = new stdClass();
         $search_conditions->additional_joins = array();
         $search_conditions->additional_where_conditions = '';
+        $search_conditions->needs_physmessages = FALSE;
 
         /*
          * Not keyword supplied? (reverse search)
@@ -6258,6 +6334,7 @@ class rcube_dbmail extends rcube_storage {
                 } else {
                     $search_conditions->additional_where_conditions = "dbmail_messages.answered_flag <> 1";
                 }
+
                 /*
                  * Unset managed items
                  */
@@ -6287,7 +6364,7 @@ class rcube_dbmail extends rcube_storage {
                     return array();
                 }
 
-                $unquoted_value = trim($items[1], '"');
+                $search_value = $this->_cleanup_search_parameter($items[1]);
 
                 /*
                  * Set tables alias
@@ -6298,15 +6375,20 @@ class rcube_dbmail extends rcube_storage {
                 $sequence++;
                 $dbmail_headervalue_alias = "dbmail_headervalue_{$sequence}";
 
+                /*
+                 * Physmessages table needed!!!!
+                 */
+                $search_conditions->needs_physmessages = TRUE;
+
                 $search_conditions->additional_joins = array(
                     "INNER JOIN dbmail_header AS {$dbmail_header_alias} ON dbmail_physmessage.id = {$dbmail_header_alias}.physmessage_id",
                     "INNER JOIN dbmail_headervalue AS {$dbmail_headervalue_alias} ON {$dbmail_header_alias}.headervalue_id = {$dbmail_headervalue_alias}.id"
                 );
 
                 if (!$is_not) {
-                    $search_conditions->additional_where_conditions = "{$dbmail_header_alias}.headername_id = {$header_name_id} AND {$dbmail_headervalue_alias}.headervalue LIKE '%{$this->dbmail->escape($unquoted_value)}%'";
+                    $search_conditions->additional_where_conditions = "{$dbmail_header_alias}.headername_id = {$header_name_id} AND {$dbmail_headervalue_alias}.headervalue LIKE '%{$this->dbmail->escape($search_value)}%'";
                 } else {
-                    $search_conditions->additional_where_conditions = "{$dbmail_header_alias}.headername_id = {$header_name_id} AND {$dbmail_headervalue_alias}.headervalue NOT LIKE '%{$this->dbmail->escape($unquoted_value)}%'";
+                    $search_conditions->additional_where_conditions = "{$dbmail_header_alias}.headername_id = {$header_name_id} AND {$dbmail_headervalue_alias}.headervalue NOT LIKE '%{$this->dbmail->escape($search_value)}%'";
                 }
 
                 /*
@@ -6330,15 +6412,20 @@ class rcube_dbmail extends rcube_storage {
                     return FALSE;
                 }
 
-                $unquoted_value = trim($items[1], '"');
+                $search_value = $this->_cleanup_search_parameter($items[1]);
 
-                $datetime_value = date_create_from_format('j-M-Y', $unquoted_value);
+                $datetime_value = date_create_from_format('j-M-Y', $search_value);
                 if (!$datetime_value) {
                     /*
                      * Malformed datetime
                      */
                     return FALSE;
                 }
+
+                /*
+                 * Physmessages table needed!!!!
+                 */
+                $search_conditions->needs_physmessages = TRUE;
 
                 $search_conditions->additional_joins = array();
 
@@ -6369,7 +6456,12 @@ class rcube_dbmail extends rcube_storage {
                     return FALSE;
                 }
 
-                $unquoted_value = trim($items[1], '"');
+                $search_value = $this->_cleanup_search_parameter($items[1]);
+
+                /*
+                 * Physmessages table needed!!!!
+                 */
+                $search_conditions->needs_physmessages = TRUE;
 
                 /*
                  * Set tables alias
@@ -6386,9 +6478,9 @@ class rcube_dbmail extends rcube_storage {
                 );
 
                 if (!$is_not) {
-                    $search_conditions->additional_where_conditions = "{$dbmail_partlists_alias}.is_header = 0 AND {$dbmail_mimeparts_alias}.data LIKE '%{$this->dbmail->escape($unquoted_value)}%'";
+                    $search_conditions->additional_where_conditions = "{$dbmail_partlists_alias}.is_header = 0 AND {$dbmail_mimeparts_alias}.data LIKE '%{$this->dbmail->escape($search_value)}%'";
                 } else {
-                    $search_conditions->additional_where_conditions = "{$dbmail_partlists_alias}.is_header = 0 AND {$dbmail_mimeparts_alias}.data NOT LIKE '%{$this->dbmail->escape($unquoted_value)}%'";
+                    $search_conditions->additional_where_conditions = "{$dbmail_partlists_alias}.is_header = 0 AND {$dbmail_mimeparts_alias}.data NOT LIKE '%{$this->dbmail->escape($search_value)}%'";
                 }
 
                 /*
@@ -6420,8 +6512,12 @@ class rcube_dbmail extends rcube_storage {
                     return array();
                 }
 
-                $unquoted_value = trim($items[1], '"');
+                $search_value = $this->_cleanup_search_parameter($items[1]);
 
+                /*
+                 * Physmessages table needed!!!!
+                 */
+                $search_conditions->needs_physmessages = TRUE;
 
                 /*
                  * Set tables alias
@@ -6438,9 +6534,9 @@ class rcube_dbmail extends rcube_storage {
                 );
 
                 if (!$is_not) {
-                    $search_conditions->additional_where_conditions = "{$dbmail_header_alias}.headername_id = {$header_name_id} AND {$dbmail_headervalue_alias}.headervalue LIKE '%{$this->dbmail->escape($unquoted_value)}%'";
+                    $search_conditions->additional_where_conditions = "{$dbmail_header_alias}.headername_id = {$header_name_id} AND {$dbmail_headervalue_alias}.headervalue LIKE '%{$this->dbmail->escape($search_value)}%'";
                 } else {
-                    $search_conditions->additional_where_conditions = "{$dbmail_header_alias}.headername_id = {$header_name_id} AND {$dbmail_headervalue_alias}.headervalue NOT LIKE '%{$this->dbmail->escape($unquoted_value)}%'";
+                    $search_conditions->additional_where_conditions = "{$dbmail_header_alias}.headername_id = {$header_name_id} AND {$dbmail_headervalue_alias}.headervalue NOT LIKE '%{$this->dbmail->escape($search_value)}%'";
                 }
 
                 /*
@@ -6532,7 +6628,12 @@ class rcube_dbmail extends rcube_storage {
                     return array();
                 }
 
-                $unquoted_value = trim($items[1], '"');
+                $search_value = $this->_cleanup_search_parameter($items[1]);
+
+                /*
+                 * Physmessages table needed!!!!
+                 */
+                $search_conditions->needs_physmessages = TRUE;
 
                 /*
                  * Set tables alias
@@ -6549,9 +6650,9 @@ class rcube_dbmail extends rcube_storage {
                 );
 
                 if (!$is_not) {
-                    $search_conditions->additional_where_conditions = "{$dbmail_header_alias}.headername_id = {$header_name_id} AND {$dbmail_headervalue_alias}.headervalue LIKE '%{$this->dbmail->escape($unquoted_value)}%'";
+                    $search_conditions->additional_where_conditions = "{$dbmail_header_alias}.headername_id = {$header_name_id} AND {$dbmail_headervalue_alias}.headervalue LIKE '%{$this->dbmail->escape($search_value)}%'";
                 } else {
-                    $search_conditions->additional_where_conditions = "{$dbmail_header_alias}.headername_id = {$header_name_id} AND {$dbmail_headervalue_alias}.headervalue NOT LIKE '%{$this->dbmail->escape($unquoted_value)}%'";
+                    $search_conditions->additional_where_conditions = "{$dbmail_header_alias}.headername_id = {$header_name_id} AND {$dbmail_headervalue_alias}.headervalue NOT LIKE '%{$this->dbmail->escape($search_value)}%'";
                 }
 
                 /*
@@ -6587,7 +6688,12 @@ class rcube_dbmail extends rcube_storage {
                     return array();
                 }
 
-                $unquoted_value = trim($items[2], '"');
+                $search_value = $this->_cleanup_search_parameter($items[2]);
+
+                /*
+                 * Physmessages table needed!!!!
+                 */
+                $search_conditions->needs_physmessages = TRUE;
 
                 /*
                  * Set tables alias
@@ -6604,9 +6710,9 @@ class rcube_dbmail extends rcube_storage {
                 );
 
                 if (!$is_not) {
-                    $search_conditions->additional_where_conditions = "{$dbmail_header_alias}.headername_id = {$header_name_id} AND {$dbmail_headervalue_alias}.headervalue LIKE '%{$this->dbmail->escape($unquoted_value)}%'";
+                    $search_conditions->additional_where_conditions = "{$dbmail_header_alias}.headername_id = {$header_name_id} AND {$dbmail_headervalue_alias}.headervalue LIKE '%{$this->dbmail->escape($search_value)}%'";
                 } else {
-                    $search_conditions->additional_where_conditions = "{$dbmail_header_alias}.headername_id = {$header_name_id} AND {$dbmail_headervalue_alias}.headervalue NOT LIKE '%{$this->dbmail->escape($unquoted_value)}%'";
+                    $search_conditions->additional_where_conditions = "{$dbmail_header_alias}.headername_id = {$header_name_id} AND {$dbmail_headervalue_alias}.headervalue NOT LIKE '%{$this->dbmail->escape($search_value)}%'";
                 }
 
                 /*
@@ -6629,7 +6735,7 @@ class rcube_dbmail extends rcube_storage {
                     return FALSE;
                 }
 
-                $unquoted_value = trim($items[1], '"');
+                $search_value = $this->_cleanup_search_parameter($items[1]);
 
                 /*
                  * Set tables alias
@@ -6642,9 +6748,9 @@ class rcube_dbmail extends rcube_storage {
                 );
 
                 if (!$is_not) {
-                    $search_conditions->additional_where_conditions = "{$dbmail_keywords_alias}.keyword = '{$this->dbmail->escape($unquoted_value)}'";
+                    $search_conditions->additional_where_conditions = "{$dbmail_keywords_alias}.keyword = '{$this->dbmail->escape($search_value)}'";
                 } else {
-                    $search_conditions->additional_where_conditions = "{$dbmail_keywords_alias}.keyword <> '{$this->dbmail->escape($unquoted_value)}'";
+                    $search_conditions->additional_where_conditions = "{$dbmail_keywords_alias}.keyword <> '{$this->dbmail->escape($search_value)}'";
                 }
 
                 /*
@@ -6668,14 +6774,19 @@ class rcube_dbmail extends rcube_storage {
                     return FALSE;
                 }
 
-                $unquoted_value = trim($items[1], '"');
+                $search_value = $this->_cleanup_search_parameter($items[1]);
+
+                /*
+                 * Physmessages table needed!!!!
+                 */
+                $search_conditions->needs_physmessages = TRUE;
 
                 $search_conditions->additional_joins = array();
 
                 if (!$is_not) {
-                    $search_conditions->additional_where_conditions = "dbmail_physmessage.rfcsize > '{$this->dbmail->escape($unquoted_value)}'";
+                    $search_conditions->additional_where_conditions = "dbmail_physmessage.rfcsize > '{$this->dbmail->escape($search_value)}'";
                 } else {
-                    $search_conditions->additional_where_conditions = "dbmail_physmessage.rfcsize <= '{$this->dbmail->escape($unquoted_value)}'";
+                    $search_conditions->additional_where_conditions = "dbmail_physmessage.rfcsize <= '{$this->dbmail->escape($search_value)}'";
                 }
 
                 /*
@@ -6743,15 +6854,20 @@ class rcube_dbmail extends rcube_storage {
                     return FALSE;
                 }
 
-                $unquoted_value = trim($items[1], '"');
+                $search_value = $this->_cleanup_search_parameter($items[1]);
 
-                $datetime_value = date_create_from_format('j-M-Y', $unquoted_value);
+                $datetime_value = date_create_from_format('j-M-Y', $search_value);
                 if (!$datetime_value) {
                     /*
                      * Malformed datetime
                      */
                     return FALSE;
                 }
+
+                /*
+                 * Physmessages table needed!!!!
+                 */
+                $search_conditions->needs_physmessages = TRUE;
 
                 $search_conditions->additional_joins = array();
 
@@ -6832,15 +6948,20 @@ class rcube_dbmail extends rcube_storage {
                     return array();
                 }
 
-                $unquoted_value = trim($items[1], '"');
+                $search_value = $this->_cleanup_search_parameter($items[1]);
 
-                $datetime_value = date_create_from_format('j-M-Y', $unquoted_value);
+                $datetime_value = date_create_from_format('j-M-Y', $search_value);
                 if (!$datetime_value) {
                     /*
                      * Malformed datetime
                      */
                     return FALSE;
                 }
+
+                /*
+                 * Physmessages table needed!!!!
+                 */
+                $search_conditions->needs_physmessages = TRUE;
 
                 /*
                  * Set tables alias
@@ -6891,15 +7012,20 @@ class rcube_dbmail extends rcube_storage {
                     return array();
                 }
 
-                $unquoted_value = trim($items[1], '"');
+                $search_value = $this->_cleanup_search_parameter($items[1]);
 
-                $datetime_value = date_create_from_format('j-M-Y', $unquoted_value);
+                $datetime_value = date_create_from_format('j-M-Y', $search_value);
                 if (!$datetime_value) {
                     /*
                      * Malformed datetime
                      */
                     return FALSE;
                 }
+
+                /*
+                 * Physmessages table needed!!!!
+                 */
+                $search_conditions->needs_physmessages = TRUE;
 
                 /*
                  * Set tables alias
@@ -6949,15 +7075,20 @@ class rcube_dbmail extends rcube_storage {
                     return array();
                 }
 
-                $unquoted_value = trim($items[1], '"');
+                $search_value = $this->_cleanup_search_parameter($items[1]);
 
-                $datetime_value = date_create_from_format('j-M-Y', $unquoted_value);
+                $datetime_value = date_create_from_format('j-M-Y', $search_value);
                 if (!$datetime_value) {
                     /*
                      * Malformed datetime
                      */
                     return FALSE;
                 }
+
+                /*
+                 * Physmessages table needed!!!!
+                 */
+                $search_conditions->needs_physmessages = TRUE;
 
                 /*
                  * Set tables alias
@@ -6999,9 +7130,9 @@ class rcube_dbmail extends rcube_storage {
                     return FALSE;
                 }
 
-                $unquoted_value = trim($items[1], '"');
+                $search_value = $this->_cleanup_search_parameter($items[1]);
 
-                $datetime_value = date_create_from_format('j-M-Y', $unquoted_value);
+                $datetime_value = date_create_from_format('j-M-Y', $search_value);
                 if (!$datetime_value) {
                     /*
                      * Malformed datetime
@@ -7009,10 +7140,15 @@ class rcube_dbmail extends rcube_storage {
                     return FALSE;
                 }
 
+                /*
+                 * Physmessages table needed!!!!
+                 */
+                $search_conditions->needs_physmessages = TRUE;
+
                 $search_conditions->additional_joins = array();
 
                 if (!$is_not) {
-                    $search_conditions->additional_where_conditions = "dbmail_physmessage.internal_date => '{$datetime_value->format('Y-m-d')} 00:00:00'";
+                    $search_conditions->additional_where_conditions = "dbmail_physmessage.internal_date >= '{$datetime_value->format('Y-m-d')} 00:00:00'";
                 } else {
                     $search_conditions->additional_where_conditions = "dbmail_physmessage.internal_date < '{$datetime_value->format('Y-m-d')} 00:00:00'";
                 }
@@ -7038,14 +7174,19 @@ class rcube_dbmail extends rcube_storage {
                     return FALSE;
                 }
 
-                $unquoted_value = trim($items[1], '"');
+                $search_value = $this->_cleanup_search_parameter($items[1]);
+
+                /*
+                 * Physmessages table needed!!!!
+                 */
+                $search_conditions->needs_physmessages = TRUE;
 
                 $search_conditions->additional_joins = array();
 
                 if (!$is_not) {
-                    $search_conditions->additional_where_conditions = "dbmail_physmessage.rfcsize < '{$this->dbmail->escape($unquoted_value)}'";
+                    $search_conditions->additional_where_conditions = "dbmail_physmessage.rfcsize < '{$this->dbmail->escape($search_value)}'";
                 } else {
-                    $search_conditions->additional_where_conditions = "dbmail_physmessage.rfcsize >= '{$this->dbmail->escape($unquoted_value)}'";
+                    $search_conditions->additional_where_conditions = "dbmail_physmessage.rfcsize >= '{$this->dbmail->escape($search_value)}'";
                 }
 
                 /*
@@ -7077,7 +7218,12 @@ class rcube_dbmail extends rcube_storage {
                     return array();
                 }
 
-                $unquoted_value = trim($items[1], '"');
+                $search_value = $this->_cleanup_search_parameter($items[1]);
+
+                /*
+                 * Physmessages table needed!!!!
+                 */
+                $search_conditions->needs_physmessages = TRUE;
 
                 /*
                  * Set tables alias
@@ -7094,9 +7240,9 @@ class rcube_dbmail extends rcube_storage {
                 );
 
                 if (!$is_not) {
-                    $search_conditions->additional_where_conditions = "{$dbmail_header_alias}.headername_id = {$header_name_id} AND {$dbmail_headervalue_alias}.headervalue LIKE '%{$this->dbmail->escape($unquoted_value)}%'";
+                    $search_conditions->additional_where_conditions = "{$dbmail_header_alias}.headername_id = {$header_name_id} AND {$dbmail_headervalue_alias}.headervalue LIKE '%{$this->dbmail->escape($search_value)}%'";
                 } else {
-                    $search_conditions->additional_where_conditions = "{$dbmail_header_alias}.headername_id = {$header_name_id} AND {$dbmail_headervalue_alias}.headervalue NOT LIKE '%{$this->dbmail->escape($unquoted_value)}%'";
+                    $search_conditions->additional_where_conditions = "{$dbmail_header_alias}.headername_id = {$header_name_id} AND {$dbmail_headervalue_alias}.headervalue NOT LIKE '%{$this->dbmail->escape($search_value)}%'";
                 }
 
                 /*
@@ -7119,8 +7265,12 @@ class rcube_dbmail extends rcube_storage {
                     return FALSE;
                 }
 
-                $unquoted_value = trim($items[1], '"');
+                $search_value = $this->_cleanup_search_parameter($items[1]);
 
+                /*
+                 * Physmessages table needed!!!!
+                 */
+                $search_conditions->needs_physmessages = TRUE;
 
                 /*
                  * Set tables alias
@@ -7137,9 +7287,9 @@ class rcube_dbmail extends rcube_storage {
                 );
 
                 if (!$is_not) {
-                    $search_conditions->additional_where_conditions = "{$dbmail_mimeparts_alias}.data LIKE '%{$this->dbmail->escape($unquoted_value)}%'";
+                    $search_conditions->additional_where_conditions = "{$dbmail_mimeparts_alias}.data LIKE '%{$this->dbmail->escape($search_value)}%'";
                 } else {
-                    $search_conditions->additional_where_conditions = "{$dbmail_mimeparts_alias}.data NOT LIKE '%{$this->dbmail->escape($unquoted_value)}%'";
+                    $search_conditions->additional_where_conditions = "{$dbmail_mimeparts_alias}.data NOT LIKE '%{$this->dbmail->escape($search_value)}%'";
                 }
 
                 /*
@@ -7171,7 +7321,12 @@ class rcube_dbmail extends rcube_storage {
                     return array();
                 }
 
-                $unquoted_value = trim($items[1], '"');
+                $search_value = $this->_cleanup_search_parameter($items[1]);
+
+                /*
+                 * Physmessages table needed!!!!
+                 */
+                $search_conditions->needs_physmessages = TRUE;
 
                 /*
                  * Set tables alias
@@ -7188,9 +7343,9 @@ class rcube_dbmail extends rcube_storage {
                 );
 
                 if (!$is_not) {
-                    $search_conditions->additional_where_conditions = "{$dbmail_header_alias}.headername_id = {$header_name_id} AND {$dbmail_headervalue_alias}.headervalue LIKE '%{$this->dbmail->escape($unquoted_value)}%'";
+                    $search_conditions->additional_where_conditions = "{$dbmail_header_alias}.headername_id = {$header_name_id} AND {$dbmail_headervalue_alias}.headervalue LIKE '%{$this->dbmail->escape($search_value)}%'";
                 } else {
-                    $search_conditions->additional_where_conditions = "{$dbmail_header_alias}.headername_id = {$header_name_id} AND {$dbmail_headervalue_alias}.headervalue NOT LIKE '%{$this->dbmail->escape($unquoted_value)}%'";
+                    $search_conditions->additional_where_conditions = "{$dbmail_header_alias}.headername_id = {$header_name_id} AND {$dbmail_headervalue_alias}.headervalue NOT LIKE '%{$this->dbmail->escape($search_value)}%'";
                 }
 
                 /*
@@ -7213,14 +7368,14 @@ class rcube_dbmail extends rcube_storage {
                     return FALSE;
                 }
 
-                $unquoted_value = trim($items[1], '"');
+                $search_value = $this->_cleanup_search_parameter($items[1]);
 
                 $search_conditions->additional_joins = array();
 
                 if (!$is_not) {
-                    $search_conditions->additional_where_conditions = "dbmail_messages.unique_id = '{$this->dbmail->escape($unquoted_value)}'";
+                    $search_conditions->additional_where_conditions = "dbmail_messages.unique_id = '{$this->dbmail->escape($search_value)}'";
                 } else {
-                    $search_conditions->additional_where_conditions = "dbmail_messages.unique_id <> '{$this->dbmail->escape($unquoted_value)}'";
+                    $search_conditions->additional_where_conditions = "dbmail_messages.unique_id <> '{$this->dbmail->escape($search_value)}'";
                 }
 
                 /*
@@ -7327,7 +7482,7 @@ class rcube_dbmail extends rcube_storage {
                     return FALSE;
                 }
 
-                $unquoted_value = trim($items[1], '"');
+                $search_value = $this->_cleanup_search_parameter($items[1]);
 
                 /*
                  * Set tables alias
@@ -7336,7 +7491,7 @@ class rcube_dbmail extends rcube_storage {
                 $dbmail_keywords_alias = "dbmail_keywords{$sequence}";
 
                 $search_conditions->additional_joins = array(
-                    "LEFT JOIN dbmail_keywords AS {$dbmail_keywords_alias} on dbmail_messages.message_idnr = {$dbmail_keywords_alias}.message_idnr AND {$dbmail_keywords_alias}.keyword = '{$this->dbmail->escape($unquoted_value)}'"
+                    "LEFT JOIN dbmail_keywords AS {$dbmail_keywords_alias} on dbmail_messages.message_idnr = {$dbmail_keywords_alias}.message_idnr AND {$dbmail_keywords_alias}.keyword = '{$this->dbmail->escape($search_value)}'"
                 );
 
                 if (!$is_not) {
