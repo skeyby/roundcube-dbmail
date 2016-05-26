@@ -30,6 +30,7 @@
  */
 class rcube_dbmail extends rcube_storage {
 
+    private $rc;
     private $debug = FALSE; ## Not really useful, we use it just to track internally the debug status 
     private $user_idnr = null;
     private $namespace = null;
@@ -162,7 +163,8 @@ class rcube_dbmail extends rcube_storage {
 
         // get main roundcube instance
         $this->rcubeInstance = rcube::get_instance();
-
+        $this->rc = rcmail::get_instance();
+        
         // set namespaces
         if (is_null($this->namespace)) {
             $this->namespace = array(
@@ -1201,12 +1203,13 @@ class rcube_dbmail extends rcube_storage {
     /**
      * Returns the whole message source as string (or saves to a file)
      *
-     * @param int      $uid Message UID
-     * @param resource $fp  File pointer to save the message
+     * @param int      $uid  Message UID
+     * @param resource $fp   File pointer to save the message
+     * @param string   $part Optional message part ID
      *
      * @return string Message source string
      */
-    public function get_raw_body($uid, $fp = null) {
+    public function get_raw_body($uid, $fp = null, $part = null) {
 
         // Retrieve message record
         $message_metadata = $this->get_message_record($uid);
@@ -1223,7 +1226,7 @@ class rcube_dbmail extends rcube_storage {
         }
 
         // extract mime parts
-        $mime = $this->fetch_part_lists($message_metadata['physmessage_id']);
+        $mime = $this->fetch_part_lists($message_metadata['physmessage_id'], $part);
 
         return $mime->body;
     }
@@ -1231,11 +1234,12 @@ class rcube_dbmail extends rcube_storage {
     /**
      * Returns the message headers as string
      *
-     * @param int $uid  Message UID
+     * @param int    $uid  Message UID
+     * @param string $part Optional message part ID
      *
      * @return string Message headers string
      */
-    public function get_raw_headers($uid) {
+    public function get_raw_headers($uid, $part = null) {
 
         // Retrieve message record
         $message_metadata = $this->get_message_record($uid);
@@ -1252,7 +1256,7 @@ class rcube_dbmail extends rcube_storage {
         }
 
         // extract mime parts
-        $mime = $this->fetch_part_lists($message_metadata['physmessage_id']);
+        $mime = $this->fetch_part_lists($message_metadata['physmessage_id'], $part);
 
         return $mime->header;
     }
@@ -2879,11 +2883,17 @@ class rcube_dbmail extends rcube_storage {
         $result['percent'] = min(100, round(($used / max(1, $total)) * 100));
         $result['free'] = 100 - $result['percent'];
 
-        /* This is creative hack to show both configurable infos for dbmail */
-        $result['all']["Messages"]["storage"]["used"] = $used;
-        $result['all']["Messages"]["storage"]["total"] = $total;
-        $result['all']["Rules"]["storage"]["used"] = $sieveused;
-        $result['all']["Rules"]["storage"]["total"] = $sievetotal;
+        /*
+         * This is creative hack to show both configurable infos for dbmail.
+         * 
+         * NOTE!!!!!!
+         * 
+         * program/include/rcmail.php (row 1761) takes those values and multiply them by 1024!!!!!!!
+         */
+        $result['all']["Messages"]["storage"]["used"] = round($used / 1024);
+        $result['all']["Messages"]["storage"]["total"] = round($total / 1024);
+        $result['all']["Rules"]["storage"]["used"] = round($sieveused / 1024);
+        $result['all']["Rules"]["storage"]["total"] = round($sievetotal / 1024);
 
         return $result;
     }
@@ -3309,10 +3319,11 @@ class rcube_dbmail extends rcube_storage {
      * @param string $folder   Folder name (empty for server metadata)
      * @param array  $entries  Entries
      * @param array  $options  Command options (with MAXSIZE and DEPTH keys)
+     * @param bool   $force    Disables cache use
      *
      * @return array Metadata entry-value hash array on success, NULL on error
      */
-    public function get_metadata($folder, $entries, $options = array()) {
+    public function get_metadata($folder, $entries, $options = array(), $force = false) {
         // TO DO!!!!!
     }
 
@@ -4923,14 +4934,15 @@ class rcube_dbmail extends rcube_storage {
     /**
      * create raw message from part lists
      * @param $physmessage_id
+     * @param string $part Optional message part ID
      * @return stdClass
      */
-    private function fetch_part_lists($physmessage_id) {
+    private function fetch_part_lists($physmessage_id, $part = NULL) {
 
         /*
          * Cached content exists?
          */
-//        $cache_key = "RAW_MESSAGE_{$physmessage_id}";
+//        $cache_key = "RAW_MESSAGE_{$physmessage_id}_{$part}";
 //        $raw_message_cached = $this->get_cache($cache_key);
 //        if (is_object($raw_message_cached)) {
 //            return $raw_message_cached;
@@ -4939,8 +4951,13 @@ class rcube_dbmail extends rcube_storage {
         $query = " SELECT dbmail_partlists.part_depth, dbmail_partlists.is_header, dbmail_mimeparts.data "
                 . " FROM dbmail_partlists "
                 . " INNER JOIN dbmail_mimeparts on dbmail_partlists.part_id = dbmail_mimeparts.id "
-                . " WHERE dbmail_partlists.physmessage_id = {$this->dbmail->escape($physmessage_id)} "
-                . " ORDER BY dbmail_partlists.part_key, dbmail_partlists.part_order ASC ";
+                . " WHERE dbmail_partlists.physmessage_id = {$this->dbmail->escape($physmessage_id)} ";
+
+        if (strlen($part) > 0) {
+            $query .= " AND dbmail_partlists.part_id = {$this->dbmail->escape($part)} ";
+        }
+
+        $query .= " ORDER BY dbmail_partlists.part_key, dbmail_partlists.part_order ASC ";
 
         $result = $this->dbmail->query($query);
 
@@ -5233,12 +5250,12 @@ class rcube_dbmail extends rcube_storage {
          *  Enable debug as you please by changing class property
          */
         if ($this->debug === TRUE) {
-            console("Part Insert, physmessage id: " . $physmessage_id);
-            console("Part Insert, is header:      " . $is_header);
-            console("Part Insert, part key:       " . $part_key);
-            console("Part Insert, part depth:     " . $part_depth);
-            console("Part Insert, part order:     " . $part_order);
-            console("Part Insert, hash:           " . $hash);
+            $this->rc->console("Part Insert, physmessage id: " . $physmessage_id);
+            $this->rc->console("Part Insert, is header:      " . $is_header);
+            $this->rc->console("Part Insert, part key:       " . $part_key);
+            $this->rc->console("Part Insert, part depth:     " . $part_depth);
+            $this->rc->console("Part Insert, part order:     " . $part_order);
+            $this->rc->console("Part Insert, hash:           " . $hash);
         }
 
         /*
@@ -5361,11 +5378,11 @@ class rcube_dbmail extends rcube_storage {
          *  Enable debug as you please by changing class property
          */
         if ($this->debug === TRUE) {
-            console("Store mime object");
-            console($mime_decoded);
-            console("Store mime object - part key:   " . $part_key);
-            console("Store mime object - part depth: " . $part_depth);
-            console("Store mime object - part order: " . $part_order);
+            $this->rc->console("Store mime object");
+            $this->rc->console($mime_decoded);
+            $this->rc->console("Store mime object - part key:   " . $part_key);
+            $this->rc->console("Store mime object - part depth: " . $part_depth);
+            $this->rc->console("Store mime object - part order: " . $part_order);
         }
 
         /*
@@ -5400,12 +5417,12 @@ class rcube_dbmail extends rcube_storage {
          *  Do we have a body?
          */
         if (property_exists($mime_decoded, 'body')) {
-            //Console("We have a message");
+            //$this->rc->console("We have a message");
             if (!$this->_part_insert($physmessage_id, $mime_decoded->body, 0, $part_key, $part_depth, $part_order)) {
                 return FALSE;
             }
         } elseif ($part_depth == 0) {
-            //Console("Empty body for first level");
+            //$this->rc->console("Empty body for first level");
             if (!$this->_part_insert($physmessage_id, "This is a multi-part message in MIME format.", 0, $part_key, $part_depth, $part_order)) {
                 return FALSE;
             }
@@ -5415,7 +5432,7 @@ class rcube_dbmail extends rcube_storage {
          *  Do we have additional parts?
          */
         if (property_exists($mime_decoded, 'parts') && is_array($mime_decoded->parts)) {
-            //Console("We have parts");
+            //$this->rc->console("We have parts");
 
             $part_depth++;
             $part_order = 0;  // When depth rises, order goes zero
@@ -7532,7 +7549,7 @@ class rcube_dbmail extends rcube_storage {
                 /*
                  * Invalid operand!
                  */
-                console('_apply_search_parameters - Invalid operand!');
+                $this->rc->console('_apply_search_parameters - Invalid operand!');
 
                 return FALSE;
         }
