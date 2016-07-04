@@ -5127,7 +5127,15 @@ class rcube_dbmail extends rcube_storage {
                 }
 
                 /*
-                 * Set an additional property, we will use it later to join related messages
+                 * Init base thread properties
+                 */
+                $message->parent_uid = NULL;
+                $message->depth = 0;
+                $message->unread_children = 0;
+                $message->has_children = FALSE;
+
+                /*
+                 * Set an additional properties, we will use it later to join related messages
                  */
                 $message->thread_id = $root_message_id;
 
@@ -5233,6 +5241,14 @@ class rcube_dbmail extends rcube_storage {
                     }
 
                     $root_message_id = count($references) > 0 && isset($references[0]) && strlen($references[0]) > 0 ? $references[0] : $message->messageID;
+
+                    /*
+                     * Init base thread properties
+                     */
+                    $message->parent_uid = NULL;
+                    $message->depth = 0;
+                    $message->unread_children = 0;
+                    $message->has_children = FALSE;
 
                     /*
                      * Add thread ID
