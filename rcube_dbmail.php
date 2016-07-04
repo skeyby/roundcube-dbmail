@@ -100,7 +100,7 @@ class rcube_dbmail extends rcube_storage {
         'SORT' => array('DISPLAY'),
         'SPECIAL-USE' => TRUE,
         'STARTTLS' => TRUE,
-        'THREAD' => array('ORDEREDSUBJECT', 'REFERENCES'), 
+        'THREAD' => array('ORDEREDSUBJECT', 'REFERENCES'),
         'UIDPLUS' => TRUE,
         'UNSELECT' => TRUE,
         'URLFETCH' => array('BINARY'),
@@ -4744,7 +4744,7 @@ class rcube_dbmail extends rcube_storage {
      * @return  array    Indexed array with message header objects
      */
     private function _list_messages($folders = null, $page = null, $sort_field = null, $sort_order = null, $slice = 0, $search_str = NULL) {
-        
+
         if (!is_array($folders) || count($folders) == 0) {
             /*
              *  no mailboxes supplied!
@@ -5162,7 +5162,8 @@ class rcube_dbmail extends rcube_storage {
         }
 
         /*
-         * Now we can retrieve missing threaded messages details
+         * Now we can retrieve missing threaded messages details. 
+         * Here we fetch all missing referenced messages.
          */
         if (count($thread_entries_list) > 0) {
 
@@ -5254,7 +5255,11 @@ class rcube_dbmail extends rcube_storage {
                 $msg_index++;
             }
         }
-        
+
+        /*
+         * Here we set base properties needed to build a flat hierarchy starting 
+         * from the conversation three (parent / depth / ...).
+         */
         foreach ($headers as $msg_index => $message) {
 
             /*
@@ -5346,7 +5351,9 @@ class rcube_dbmail extends rcube_storage {
         }
 
         /**
-         * Translate messages internal-date property to timestamp
+         * Translate messages internal-date property to timestamp.
+         * We will use this property to order inner messages within same 
+         * depth (don't do that on root messages or user sorting will be ignored).
          */
         foreach ($headers as $msg_index => $message) {
 
@@ -5358,6 +5365,9 @@ class rcube_dbmail extends rcube_storage {
             $headers[$msg_index]->internaldate_GMT = $internaldate->getTimestamp();
         }
 
+        /**
+         * Ok, flattern messages list before returning it!
+         */
         $response = array();
         $this->_flattern_threaded_messages($headers, 0, 0, $response);
 
