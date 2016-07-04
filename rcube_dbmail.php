@@ -5002,7 +5002,11 @@ class rcube_dbmail extends rcube_storage {
     }
 
     /**
-     * Retrieve threaded messages view entries
+     * Retrieve threaded messages view entries. 
+     * 
+     * NOTE!!!!!! 
+     * This method is pretty heavier than the default 'list' view!!!!!
+     * 
      * @param array $mailboxes
      * @param string $search_str
      * @param string $sort_field
@@ -5351,9 +5355,7 @@ class rcube_dbmail extends rcube_storage {
         }
 
         /**
-         * Translate messages internal-date property to timestamp.
-         * We will use this property to order inner messages within same 
-         * depth (don't do that on root messages or user sorting will be ignored).
+         * Translate messages internal-date property to timestamp so it will be easier to compare items by datetime
          */
         foreach ($headers as $msg_index => $message) {
 
@@ -5366,11 +5368,22 @@ class rcube_dbmail extends rcube_storage {
         }
 
         /**
-         * Ok, flattern messages list before returning it!
+         * Sort inner messages (those with depth greater than 0) by internal date, this will lead to:
+         * - leave root messages ordered according to user selection
+         * - list conveniently threaded messages
+         */
+        usort($headers, $this->_sort_threaded_messages_list());
+
+        /**
+         * Last but not the least... Here we recursivelly iterate over messages 
+         * to build the flattern contents.
          */
         $response = array();
-        $this->_flattern_threaded_messages($headers, 0, 0, $response);
+        $this->_flattern_threaded_messages($headers, 0, $response);
 
+        /**
+         * Done!
+         */
         return array_values($response);
     }
 
@@ -8051,10 +8064,18 @@ class rcube_dbmail extends rcube_storage {
         return $search_conditions;
     }
 
+    /**
+     * Retrieve a physmessages list wich references a specific message 
+     * @param string 'message-id' header to search for
+     * @return array
+     */
     private function get_thread_related_message_idnrs($header_message_id = NULL) {
 
         $response = array();
 
+        /**
+         * Nothing to do....
+         */
         if (strlen($header_message_id) == 0) {
             return $response;
         }
@@ -8108,14 +8129,13 @@ class rcube_dbmail extends rcube_storage {
         return $response;
     }
 
-    private function _flattern_threaded_messages($messages = array(), $parent_uid = NULL, $depth = 0, &$response = array()) {
-
-        /*
-         *  Sort messages by internal-date (only on no
-         */
-        if ($depth > 0) {
-            usort($messages, $this->multidimensionalObjsArraySort('internaldate_GMT', 'ASC'));
-        }
+    /**
+     * This will build a flattern array containing threaded messages list
+     * @param array messages list
+     * @param int parent message id
+     * @param array referente to response array
+     */
+    private function _flattern_threaded_messages($messages = array(), $parent_uid = NULL, &$response = array()) {
 
         foreach ($messages as $message) {
 
@@ -8133,8 +8153,27 @@ class rcube_dbmail extends rcube_storage {
 
             $response[] = $message;
 
-            $this->_flattern_threaded_messages($messages, $message->uid, ($message->depth + 1), $response);
+            $this->_flattern_threaded_messages($messages, $message->uid, $response);
         }
+    }
+
+    /**
+     * 'usort' callback method to sort by 'internal-date' property a 
+     * threaded messages list.
+     */
+    private function _sort_threaded_messages_list() {
+
+        return function ($a, $b) {
+
+            if (!isset($a->depth) || !isset($a->depth) || $a->depth == 0 || $b->depth == 0) {
+                /**
+                 * Do not change root items!
+                 */
+                return 0;
+            }
+
+            return strnatcmp($a->internaldate_GMT, $b->internaldate_GMT);
+        };
     }
 
 }
