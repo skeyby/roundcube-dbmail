@@ -15,11 +15,6 @@
  *    $config['dbmail_cache'] = 'db';                       # Generic cache switch. FALSE (to disable cache) / 'db' / 'memcache' / 'apc'
  *    $config['dbmail_cache_ttl'] = '10d';                  # Cache default expire value
  *    $config['dbmail_sql_debug'] = FALSE;                  # log executed queries to 'logs/sql'?
- *
- * !!! IMPORTANT !!!
- * Use the official PEAR Mail_mimeDecode library, changing following line in 'composer.json'
- * change  "pear/mail_mime-decode": ">=1.5.5",
- * to      "pear-pear.php.net/Mail_mimeDecode": ">=1.5.5",
  * 
  * ----------------------------
  * 
