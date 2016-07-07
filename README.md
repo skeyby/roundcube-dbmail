@@ -8,8 +8,6 @@ rcube_dmail is a _storage plugin_ for roundcube webmail (http://roundcube.net), 
 
 Current release of the plugin implement all the basic functionalities of RoundCube.
 
-Currently everything work but thread-view.
-
 The plugin is currently only tested with **MySQL**, but plans include support for postgre and other.
 
 Any help is greatly welcome :-)
