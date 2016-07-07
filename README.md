@@ -33,17 +33,6 @@ $config["messages_cache"] = TRUE;    // Cache for messages. We don't use it
 $config["dbmail_cache_ttl"] = "10d"; // Cache default expire value
 ```
 
-!!! IMPORTANT !!!
-Use the official PEAR Mail_mimeDecode library, changing following line in 'composer.json'
-- change:  "pear/mail_mime-decode": ">=1.5.5",
-- to:      "pear-pear.php.net/Mail_mimeDecode": ">=1.5.5",
-
-then run 
-
-```
-php -f composer.phar --no-dev
-```
-
 ---
 ## Sponsorship
 
