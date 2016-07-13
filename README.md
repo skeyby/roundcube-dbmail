@@ -8,8 +8,6 @@ rcube_dmail is a _storage plugin_ for roundcube webmail (http://roundcube.net), 
 
 Current release of the plugin implement all the basic functionalities of RoundCube.
 
-Currently everything work but thread-view.
-
 The plugin is currently only tested with **MySQL**, but plans include support for postgre and other.
 
 Any help is greatly welcome :-)
@@ -31,17 +29,6 @@ $config['dbmail_fixed_headername_cache'] = FALSE; # add new headernames (if not
 $config["dbmail_cache"] = "db";      // Generic cache switch
 $config["messages_cache"] = TRUE;    // Cache for messages. We don't use it
 $config["dbmail_cache_ttl"] = "10d"; // Cache default expire value
-```
-
-!!! IMPORTANT !!!
-Use the official PEAR Mail_mimeDecode library, changing following line in 'composer.json'
-- change:  "pear/mail_mime-decode": ">=1.5.5",
-- to:      "pear-pear.php.net/Mail_mimeDecode": ">=1.5.5",
-
-then run 
-
-```
-php -f composer.phar --no-dev
 ```
 
 ---
