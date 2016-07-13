@@ -644,63 +644,98 @@ class rcube_dbmail extends rcube_storage {
      * @param  boolean $force   Force reading from server and update cache
      * @param  boolean $status  Enables storing folder status info (max UID/count),
      *                          required for folder_status()
-     *
      * @return int Number of messages
      */
     public function count($folder = null, $mode = 'ALL', $force = false, $status = true) {
 
-        // Folder name supplied? 
-        if (strlen($folder) == 0) {
-            $folder = $this->folder;
+        /*
+         * Normalize target mailbox/s
+         */
+        if (is_array($folder) && count($folder) > 0) {
+            // mailboxes list supplied
+            $target = $folder;
+        } elseif (is_string($folder) && strlen($folder) > 0) {
+            // single mailbox supplied
+            $target = array($folder);
+        } elseif (array_key_exists('search_scope', $_SESSION) && $_SESSION['search_scope'] == 'all') {
+            // no mailbox supplied, search within all mailboxes
+            $target = $this->list_folders_subscribed('', '*', 'mail', null, true);
+        } else if (array_key_exists('search_scope', $_SESSION) && $_SESSION['search_scope'] == 'sub') {
+            // no mailbox supplied, search within current mailbox and nested ones
+            $target = $this->list_folders_subscribed($this->folder, '*', 'mail');
+        } elseif (strlen($this->folder) > 0) {
+            $target = array($this->folder);
         }
 
-        // Retrieve mailbox ID
-        $mail_box_idnr = $this->get_mail_box_id($folder);
-        if (!$mail_box_idnr) {
-            // Not found - Skip!
-            return FALSE;
+        /*
+         * Do we have something?
+         */
+        if (!is_array($target) || count($target) == 0) {
+            // empty set!!!
+            return 0;
         }
 
-        // ACLs check ('lookup' and 'read' grants required )
-        $ACLs = $this->_get_acl(NULL, $mail_box_idnr);
-        if (!is_array($ACLs) || !in_array(self::ACL_LOOKUP_FLAG, $ACLs) || !in_array(self::ACL_READ_FLAG, $ACLs)) {
-            // Unauthorized - Skip!
-            return FALSE;
-        }
+        $folders = $this->_format_folders_list($target);
 
-        // Retrieve folder 'seq' flag
-        $mail_box_seq = $this->get_mailbox_seq($mail_box_idnr);
+        /*
+         * Map mailboxes ID
+         */
+        $mailboxes = array();
+        $seqFlags = array();
+        foreach ($folders as $folder_name) {
 
-        // Set cache key
-        $rcmh_cached_key = "MAILBOX_COUNT_" . $mode . "_" . $mail_box_idnr;
-
-        // Retrieve cached entry (if available) 
-        if (isset($this->search_set[0]) && strlen($this->search_set[0]) > 0) {
-            /**
-             * We have a search string, could not use cache nor write result to cache!
+            /*
+             * Retrieve mailbox ID
              */
-            $rcmh_cached = FALSE;
-            $entry_cacheable = FALSE;
-        } elseif ($force) {
-            /**
-             * Forced scan and write result to cache
+            $mail_box_idnr = $this->get_mail_box_id($folder_name);
+            if (!$mail_box_idnr) {
+                // Not found - Skip!
+                return FALSE;
+            }
+
+            /*
+             * ACLs check ('lookup' and 'read' grants required )
              */
-            $rcmh_cached = FALSE;
-            $entry_cacheable = TRUE;
-        } else {
-            /**
-             * Retrieve cached content
+            $ACLs = $this->_get_acl(NULL, $mail_box_idnr);
+            if (!is_array($ACLs) || !in_array(self::ACL_LOOKUP_FLAG, $ACLs) || !in_array(self::ACL_READ_FLAG, $ACLs)) {
+                // Unauthorized - Skip!
+                return FALSE;
+            }
+
+            /*
+             * Add mailbox ID to mailboxes list
              */
-            $rcmh_cached = $this->get_cache($rcmh_cached_key);
-            $entry_cacheable = TRUE;
+            $mailboxes[$mail_box_idnr] = $folder_name;
+
+            /*
+             * Retrieve mailbox current 'seq' flag (we will use this list to build 
+             * cache key to prevent using an outdated value!)
+             */
+            $seqFlags[$mail_box_idnr] = $this->get_mailbox_seq(key($mailboxes));
         }
 
-        // Here we check cached entry exists and mailbox 'seq' flag is unchanged.
-        if ($rcmh_cached && isset($rcmh_cached->count) && isset($rcmh_cached->mail_box_seq) && $rcmh_cached->mail_box_seq == $mail_box_seq) {
+        /*
+         * Valid mailboxes supplied?
+         */
+        if (!is_array($mailboxes) || count($mailboxes) == 0) {
+            // empty set!!!
+            return 0;
+        }
+
+        /*
+         * Set cache key
+         */
+        $token = $mode;
+        $token .= serialize($seqFlags);
+        $token .= isset($this->search_set[0]) ? $this->search_set[0] : '';
+        $rcmh_cached_key = "MAILBOX_COUNT_" . md5($token);
+
+        $rcmh_cached = $this->get_cache($rcmh_cached_key);
+        if ($rcmh_cached) {
             /*
              * Return cached content
              */
-            return $rcmh_cached->count;
+            return $rcmh_cached;
         }
 
         /*
@@ -732,7 +767,7 @@ class rcube_dbmail extends rcube_storage {
         /*
          * Set base 'where' conditions
          */
-        $where_conditions = " WHERE dbmail_messages.mailbox_idnr = {$mail_box_idnr} ";
+        $where_conditions = " WHERE dbmail_messages.mailbox_idnr IN (" . implode(",", array_keys($mailboxes)) . ")";
         $where_conditions .= " AND dbmail_messages.status < " . self::MESSAGE_STATUS_DELETE . " ";
 
         /*
@@ -787,6 +822,7 @@ class rcube_dbmail extends rcube_storage {
         $query .= " {$additional_joins} ";
         $query .= " {$where_conditions} ";
 
+
         /*
          * Execute query
          */
@@ -803,12 +839,12 @@ class rcube_dbmail extends rcube_storage {
             while ($row = $this->dbmail->fetch_assoc($res)) {
 
                 /*
-                 * Retrieve thread base message identifier
+                 * Retrieve thread details (base message identifier and ancesters list)
                  */
-                $root_message_id = $this->_get_base_thread_message_id($row['physmessage_id']);
-                if (!in_array($root_message_id, $threads)) {
+                $thread_details = $this->_get_thread_details($row['physmessage_id'], $row['message_idnr'], $mailboxes[$row['mailbox_idnr']]);
+                if (!in_array($thread_details->base_thread_message_id, $threads)) {
                     $count++;
-                    $threads[] = $root_message_id;
+                    $threads[] = $thread_details->base_thread_message_id;
                 }
             }
         } else {
@@ -820,20 +856,15 @@ class rcube_dbmail extends rcube_storage {
         /*
          * Write to cache
          */
-        if ($entry_cacheable) {
-            $rcmh_new_cached = new stdClass();
-            $rcmh_new_cached->count = $count;
-            $rcmh_new_cached->mail_box_seq = $mail_box_seq;
-
-            $this->update_cache($rcmh_cached_key, $rcmh_new_cached);
-        }
+        $this->update_cache($rcmh_cached_key, $count);
 
         /*
          * Set 'folder_status' when needed
          */
         if ($mode == 'ALL' && $status) {
-            $this->set_folder_stats($folder, 'cnt', $count);
-            $this->set_folder_stats($folder, 'maxuid', ($count > 0 ? $this->get_latest_message_idnr($folder) : 0));
+            $target_folder_name = array_pop($mailboxes);
+            $this->set_folder_stats($target_folder_name, 'cnt', $count);
+            $this->set_folder_stats($target_folder_name, 'maxuid', ($count > 0 ? $this->get_latest_message_idnr($target_folder_name) : 0));
         }
 
         return $count;
@@ -4253,7 +4284,7 @@ class rcube_dbmail extends rcube_storage {
             /*
              * If we're in the message list we certainly have an up-to-date message listing
              */
-            if (is_array($message_data)) {
+            if (is_array($message_data) && !empty($message_data)) {
 
                 $rcmh_cached->folder = $message_data['folder_record']['name'];
                 $rcmh_cached->flags["SEEN"] = ($message_data['seen_flag'] == 1 ? TRUE : FALSE);
@@ -4262,6 +4293,27 @@ class rcube_dbmail extends rcube_storage {
                 $rcmh_cached->flags["FLAGGED"] = ($message_data['flagged_flag'] == 1 ? TRUE : FALSE);
                 $rcmh_cached->flags["FORWARDED"] = $this->get_keyword($message_idnr, self::KEYWORD_FORWARDED);
                 $rcmh_cached->flags["SKIP_MBOX_CHECK"] = TRUE;
+            }
+
+            /**
+             * Threaded view enabled? Make sure to return thread details too!
+             */
+            if ($this->get_threading() &&
+                    isset($message_data["physmessage_id"]) &&
+                    (!isset($rcmh_cached->base_thread_message_id) || strlen($rcmh_cached->base_thread_message_id) == 0 || !isset($rcmh_cached->ancesters) )) {
+
+                /*
+                 * retrieve thread details 
+                 */
+                $thread_details = $this->_get_thread_details($message_data["physmessage_id"], $rcmh_cached->id, $rcmh_cached->folder);
+
+                $rcmh_cached->base_thread_message_id = $thread_details->base_thread_message_id;
+                $rcmh_cached->ancesters = $thread_details->ancesters;
+
+                /*
+                 * update cached contents
+                 */
+                $this->update_cache($rcmh_cached_key, $rcmh_cached);
             }
 
             return $rcmh_cached;
@@ -4338,6 +4390,22 @@ class rcube_dbmail extends rcube_storage {
             }
 
             $rcmh->structure = $this->get_structure($mime_decoded);
+        }
+
+        /**
+         * Threaded view enabled? Make sure to return thread details too!
+         */
+        if ($this->get_threading() &&
+                isset($message_data["physmessage_id"]) &&
+                (!isset($rcmh_cached->base_thread_message_id) || strlen($rcmh_cached->base_thread_message_id) == 0 || !isset($rcmh_cached->ancesters) )) {
+
+            /*
+             * retrieve thread details 
+             */
+            $thread_details = $this->_get_thread_details($message_data['physmessage_id'], $rcmh_cached->id, $rcmh_cached->folder);
+
+            $rcmh->base_thread_message_id = $thread_details->base_thread_message_id;
+            $rcmh->ancesters = $thread_details->ancesters;
         }
 
         // update cached contents
@@ -4845,13 +4913,13 @@ class rcube_dbmail extends rcube_storage {
          * Return entries 
          */
         if ($this->get_threading()) {
-            return $this->_get_threaded_messages(array_keys($mailboxes), $search_str, $sort_field, $sort_order, $query_offset, $query_limit);
+            return $this->_get_threaded_messages($mailboxes, $search_str, $sort_field, $sort_order, $query_offset, $query_limit);
         } else {
-            return $this->_get_listed_messages(array_keys($mailboxes), $search_str, $sort_field, $sort_order, $query_offset, $query_limit);
+            return $this->_get_listed_messages($mailboxes, $search_str, $sort_field, $sort_order, $query_offset, $query_limit);
         }
     }
 
-    private function _get_list_message_query($mailbox_idnrs = array(), $query_offset = null, $query_limit = null, $sort_field = null, $sort_order = null, $search_str = NULL, $target_message_idnrs = array()) {
+    private function _get_list_message_query($mailboxes = array(), $query_offset = null, $query_limit = null, $sort_field = null, $sort_order = null, $search_str = NULL, $target_message_idnrs = array()) {
 
         /*
          * Init additional join tables list (sort / filters)
@@ -4871,7 +4939,7 @@ class rcube_dbmail extends rcube_storage {
          * "Base Condition" is that the message should not be EXPUNGED (thus DELETED) and within target mailboxes
          */
         $where_conditions = " WHERE dbmail_messages.status < " . self::MESSAGE_STATUS_DELETE;
-        $where_conditions .= " AND dbmail_messages.mailbox_idnr IN (" . implode(",", $mailbox_idnrs) . ")";
+        $where_conditions .= " AND dbmail_messages.mailbox_idnr IN (" . implode(",", array_keys($mailboxes)) . ")";
 
         /*
          * Apply search criteria
@@ -4927,9 +4995,10 @@ class rcube_dbmail extends rcube_storage {
 
                 $sort_condition = " ORDER BY sort_dbmail_physmessage.messagesize {$this->dbmail->escape($sort_order)} ";
                 break;
+            case 'message_idnr';
             default:
                 /*
-                 *  natural sort - do nothing!
+                 * order by primary key (default)
                  */
                 $sort_condition = " ORDER BY dbmail_messages.message_idnr {$this->dbmail->escape($sort_order)} ";
                 break;
@@ -5059,7 +5128,15 @@ class rcube_dbmail extends rcube_storage {
          * Init base massages container
          */
         $headers = array();
-        $msg_index = ($query_offset + 1);
+        $msg_index = 0;
+
+        /*
+         * Despite of messages list, here we need to retrieve items starting from 
+         * offset 0, than slice result according to unique threads found because 
+         * extracting 10 records doesn't mean return 10 threads.
+         */
+        $threads_offset = $query_offset;
+        $query_offset = 0;
 
         /*
          * When building a threaded messages list, we should count unique thread-ID 
@@ -5069,6 +5146,7 @@ class rcube_dbmail extends rcube_storage {
         $threads_count = 0;
         $threads_id = array();
         $thread_entries_list = array();
+        $thread_messages_idnr = array();
         $message_id_header_lookup = array();
 
         while ($fetch_more_records) {
@@ -5128,25 +5206,23 @@ class rcube_dbmail extends rcube_storage {
                 $message = $this->retrieve_message($msg["message_idnr"], $mailboxes[$msg["mailbox_idnr"]], $message_data, FALSE);
 
                 /*
-                 * Retrieve thread base message identifier
-                 */
-                $root_message_id = $this->_get_base_thread_message_id($msg['physmessage_id']);
-
-                /*
                  * Increment threads counters on unique conversations
                  */
-                if (!in_array($root_message_id, $threads_id)) {
-                    $threads_id[] = $root_message_id;
+                if (!in_array($message->base_thread_message_id, $threads_id) && $threads_count <= ($threads_offset + $query_limit)) {
+                    /**
+                     * Unique thread found. 
+                     * NOTE!!!!!! Is really important that unique thread identifiers 
+                     * get's appended to thread list according to extraction order, 
+                     * so we can slice them later on according to user pagination!
+                     */
+                    $threads_id[] = $message->base_thread_message_id;
                     $threads_count++;
-                }
-
-                /*
-                 * Retrieve thread entries (if any), they will be fetched later.
-                 */
-                foreach ($this->get_thread_related_message_idnrs($root_message_id) as $message_idnr => $physmessage_id) {
-                    if (!in_array($message_idnr, $thread_entries_list) && $message_idnr != $msg["message_idnr"]) {
-                        $thread_entries_list[] = $message_idnr;
-                    }
+                } elseif (!in_array($message->base_thread_message_id, $threads_id)) {
+                    /**
+                     * Unique threads count limit reached
+                     */
+                    $fetch_more_records = FALSE;
+                    break;
                 }
 
                 /*
@@ -5158,14 +5234,14 @@ class rcube_dbmail extends rcube_storage {
                 $message->has_children = FALSE;
 
                 /*
-                 * Set an additional properties, we will use it later to join related messages
-                 */
-                $message->thread_id = $root_message_id;
-
-                /*
                  * Format 'message-id' header according to 'dbmail_referencesfield' table content
                  */
                 $message->thread_message_id = $this->clean_up_thread_message_id($message->messageID);
+
+                /*
+                 * Populate message_idnrs list
+                 */
+                $thread_messages_idnr[$msg["message_idnr"]] = $msg['physmessage_id'];
 
                 /*
                  * Prevent duplicated items
@@ -5185,14 +5261,8 @@ class rcube_dbmail extends rcube_storage {
                     $message_id_header_lookup[$message->thread_message_id]->msg_index = $msg_index;
                     $message_id_header_lookup[$message->thread_message_id]->message_idnr = $msg["message_idnr"];
                     $message_id_header_lookup[$message->thread_message_id]->physmessage_id = $msg['physmessage_id'];
+                    $message_id_header_lookup[$message->thread_message_id]->folder = $mailboxes[$msg["mailbox_idnr"]];
                 }
-            }
-
-            /*
-             * Do we need to fetch some more recors?
-             */
-            if ($threads_count >= $query_limit) {
-                $fetch_more_records = FALSE;
             }
 
             /*
@@ -5202,15 +5272,43 @@ class rcube_dbmail extends rcube_storage {
         }
 
         /*
+         * At this point, we slice unique threads list according to pagination.
+         */
+        $threads_id = array_slice($threads_id, $threads_offset);
+        
+        /*
+         * Now we can remove from '$headers' list messages related to unnecessary threads
+         */
+        foreach ($headers as $msg_index => $message) {
+            if (!in_array($message->base_thread_message_id, $threads_id)) {
+                unset($message_id_header_lookup[$message->thread_message_id]);
+                unset($headers[$msg_index]);
+            }
+        }
+
+        /*
+         * Foreach unique thread found, search for related messages within dbmail 'referencesfield' table.
+         * We will use this list to compare extracted messages and retrieve missing ones.
+         */
+        foreach ($threads_id as $thread_id) {
+            foreach ($this->get_thread_related_message_idnrs($thread_id) as $message_idnr => $physmessage_id) {
+                if (!array_key_exists($message_idnr, $thread_messages_idnr)) {
+                    $thread_entries_list[] = $message_idnr;
+                }
+            }
+        }
+
+        /*
          * Now we can retrieve missing threaded messages details. 
          * Here we fetch all missing referenced messages.
          */
         if (count($thread_entries_list) > 0) {
 
             /**
-             * build query to retrieve missing messages
+             * Build query to retrieve missing messages. 
+             * Here we don't need a specific sort order so we order by primary key to speed up query execution.
              */
-            $missing_threaded_messages_query = $this->_get_list_message_query(array_keys($mailboxes), 0, count($thread_entries_list), $sort_field, $sort_order, $search_str, $thread_entries_list);
+            $missing_threaded_messages_query = $this->_get_list_message_query($mailboxes, 0, count($thread_entries_list), 'message_idnr', 'asc', $search_str, $thread_entries_list);
 
             /*
              * Execute query
@@ -5257,14 +5355,14 @@ class rcube_dbmail extends rcube_storage {
                 $message->thread_message_id = $this->clean_up_thread_message_id($message->messageID);
 
                 /*
+                 * Populate message_idnrs list
+                 */
+                $thread_messages_idnr[$msg["message_idnr"]] = $msg['physmessage_id'];
+
+                /*
                  * Prevent duplicated items
                  */
                 if (!array_key_exists($message->thread_message_id, $message_id_header_lookup)) {
-
-                    /*
-                     * Retrieve thread base message identifier
-                     */
-                    $root_message_id = $this->_get_base_thread_message_id($msg['physmessage_id']);
 
                     /*
                      * Init base thread properties
@@ -5275,13 +5373,9 @@ class rcube_dbmail extends rcube_storage {
                     $message->has_children = FALSE;
 
                     /*
-                     * Add thread ID
-                     */
-                    $message->thread_id = $root_message_id;
-
-                    /*
                      * Add message to the list
                      */
+                    $msg_index++;
                     $headers[$msg_index] = $message;
 
                     /*
@@ -5291,12 +5385,8 @@ class rcube_dbmail extends rcube_storage {
                     $message_id_header_lookup[$message->thread_message_id]->msg_index = $msg_index;
                     $message_id_header_lookup[$message->thread_message_id]->message_idnr = $msg["message_idnr"];
                     $message_id_header_lookup[$message->thread_message_id]->physmessage_id = $msg['physmessage_id'];
+                    $message_id_header_lookup[$message->thread_message_id]->folder = $mailboxes[$msg["mailbox_idnr"]];
                 }
-
-                /*
-                 * Add message header to response list
-                 */
-                $msg_index++;
             }
         }
 
@@ -5327,12 +5417,13 @@ class rcube_dbmail extends rcube_storage {
                 $headers[$msg_index]->has_children = FALSE;
             }
 
-            $ancesters = $this->_get_thread_references($message_id_header_lookup[$message->thread_message_id]->physmessage_id);
+            $physmessage_id = $message_id_header_lookup[$message->thread_message_id]->physmessage_id;
+            $message_idnr = $message_id_header_lookup[$message->thread_message_id]->message_idnr;
 
             /*
              * Iterate over ancesters 
              */
-            foreach ($ancesters as $ancester_ID) {
+            foreach ($message->ancesters as $ancester_ID) {
 
                 $ancester = array_key_exists($ancester_ID, $message_id_header_lookup) ? $message_id_header_lookup[$ancester_ID] : FALSE;
                 if (!$ancester) {
@@ -5383,7 +5474,7 @@ class rcube_dbmail extends rcube_storage {
          * to build the flattern contents.
          */
         $response = array();
-        $this->_flattern_threaded_messages($headers, 0, $response);
+        $this->_flattern_threaded_messages($headers, NULL, $response);
 
         /**
          * Done!
@@ -8054,7 +8145,7 @@ class rcube_dbmail extends rcube_storage {
                 /*
                  * Invalid operand!
                  */
-                $this->rc->console('_apply_search_parameters - Invalid operand!');
+                // $this->rc->console('_apply_search_parameters - Invalid operand!');
 
                 return FALSE;
         }
@@ -8080,119 +8171,35 @@ class rcube_dbmail extends rcube_storage {
     }
 
     /**
-     * Retrieve base thread message ID header.
+     * Retrieve base thread message-id and full ancesters list.
+     * Try to use cache as much as we can!!!!!!
+     * @param int $physmessage_id
+     * @param int $message_idnr
+     * @param string $folder
+     * @return mixed
      */
-    private function _get_base_thread_message_id($physmessage_id = NULL) {
+    private function _get_thread_details($physmessage_id = NULL, $message_idnr = NULL, $folder = NULL) {
 
-        /*
+        /**
          * Set cache key
          */
-        $rcmh_cached_key = "BASE_THREAD_MSG_" . $physmessage_id;
+        $rcmh_cached_key = "THREAD_DETAILS_MSG_" . $physmessage_id;
 
         /*
          * Do we already have a cache entry?
          */
         $rcmh_cached = $this->get_cache($rcmh_cached_key);
-        if ($rcmh_cached && strlen($rcmh_cached) > 0) {
+        if ($rcmh_cached &&
+                isset($rcmh_cached->base_thread_message_id) &&
+                strlen($rcmh_cached->base_thread_message_id) > 0 &&
+                isset($rcmh_cached->ancesters) &&
+                is_array($rcmh_cached->ancesters)) {
             return $rcmh_cached;
         }
 
         /**
-         * First step, search within 'referencesfield' table (first entry is the base message!)
-         */
-        $references_sql = " SELECT referencesfield "
-                . " FROM dbmail_referencesfield "
-                . " WHERE physmessage_id = '{$this->dbmail->escape($physmessage_id)}' "
-                . " ORDER BY id ASC "
-                . " LIMIT 1 ";
-
-        $references_result = $this->dbmail->query($references_sql);
-
-        $reference = $this->dbmail->fetch_assoc($references_result);
-
-        if (isset($reference['referencesfield']) && strlen($reference['referencesfield']) > 0) {
-
-            $this->update_cache($rcmh_cached_key, $reference['referencesfield']);
-
-            return $reference['referencesfield'];
-        }
-
-        /**
-         * Second Step, search for 'in-reply-to' header
-         */
-        $in_reply_to_sql = " SELECT dbmail_headervalue.headervalue "
-                . " FROM dbmail_header "
-                . " INNER JOIN dbmail_headername ON dbmail_header.headername_id = dbmail_headername.id "
-                . " INNER JOIN dbmail_headervalue ON dbmail_header.headervalue_id = dbmail_headervalue.id "
-                . " WHERE dbmail_header.physmessage_id = '{$this->dbmail->escape($physmessage_id)}' "
-                . " AND dbmail_headername.headername = 'in-reply-to' ";
-
-        $in_reply_to_result = $this->dbmail->query($in_reply_to_sql);
-
-        $in_reply_to_header = $this->dbmail->fetch_assoc($in_reply_to_result);
-
-        if (isset($in_reply_to_header['headervalue']) && strlen($in_reply_to_header['headervalue']) > 0) {
-
-            $message_id = $this->clean_up_thread_message_id($in_reply_to_header['headervalue']);
-
-            $this->update_cache($rcmh_cached_key, $message_id);
-
-            return $message_id;
-        }
-
-        /**
-         * Nothing found? Than use current 'message-id' header as base thread
-         */
-        $message_id_sql = " SELECT dbmail_headervalue.headervalue "
-                . " FROM dbmail_header "
-                . " INNER JOIN dbmail_headername ON dbmail_header.headername_id = dbmail_headername.id "
-                . " INNER JOIN dbmail_headervalue ON dbmail_header.headervalue_id = dbmail_headervalue.id "
-                . " WHERE dbmail_header.physmessage_id = '{$this->dbmail->escape($physmessage_id)}' "
-                . " AND dbmail_headername.headername = 'message-id' ";
-
-        $message_id_result = $this->dbmail->query($message_id_sql);
-
-        $message_id_header = $this->dbmail->fetch_assoc($message_id_result);
-
-        if (isset($message_id_header['headervalue']) && strlen($message_id_header['headervalue']) > 0) {
-
-            $message_id = $this->clean_up_thread_message_id($message_id_header['headervalue']);
-
-            $this->update_cache($rcmh_cached_key, $message_id);
-
-            return $message_id;
-        }
-
-        /**
-         * We should never arrive here. If so... generate and return a dummy ID without cacheing it!
-         */
-        return microtime() . rand(0, 10000);
-    }
-
-    /**
-     * Retrieve thread messages relations
-     */
-    private function _get_thread_references($physmessage_id = NULL) {
-
-        /*
-         * Set cache key
-         */
-        $rcmh_cached_key = "THREAD_REFERENCES_MSG_" . $physmessage_id;
-
-        /*
-         * Do we already have a cache entry?
-         */
-        $rcmh_cached = $this->get_cache($rcmh_cached_key);
-        if ($rcmh_cached && is_array($rcmh_cached)) {
-            return $rcmh_cached;
-        }
-
-        /**
-         * Set response container
-         */
-        $response = array();
-
-        /**
+         * Retrieve message ancesters
+         * 
          * https://tools.ietf.org/html/rfc5256
          * 
          * If a message contains a References header line, then use the
@@ -8217,50 +8224,77 @@ class rcube_dbmail extends rcube_storage {
          * the In-Reply-To header line does not contain a valid Message
          * ID, then the message does not have any references (NIL).
          */
+        $response = new stdClass();
+        $response->base_thread_message_id = NULL;
+        $response->ancesters = array();
+
+        /**
+         * First step, search within 'referencesfield' table (first entry is the base message!)
+         */
         $references_sql = " SELECT referencesfield "
                 . " FROM dbmail_referencesfield "
                 . " WHERE physmessage_id = '{$this->dbmail->escape($physmessage_id)}' "
                 . " ORDER BY id ASC ";
 
         $references_result = $this->dbmail->query($references_sql);
-
         while ($row = $this->dbmail->fetch_assoc($references_result)) {
-            $response[] = $row['referencesfield'];
+            $response->ancesters[] = trim($row['referencesfield']);
         }
 
-        if (count($response) > 0) {
-
+        /**
+         * Done?
+         */
+        if (count($response->ancesters) > 0 && isset($response->ancesters[0]) && strlen($response->ancesters[0]) > 0) {
+            $response->base_thread_message_id = $response->ancesters[0];
             $this->update_cache($rcmh_cached_key, $response);
-
             return $response;
         }
 
         /**
-         * Search for 'in-reply-to' header
+         * Second Step, sometimes dbmail 'referencesfield' is useless even if message 
+         * headers contains 'references' entry, so let's retrieve message datails. 
          */
-        $in_reply_to_sql = " SELECT dbmail_headervalue.headervalue "
-                . " FROM dbmail_header "
-                . " INNER JOIN dbmail_headername ON dbmail_header.headername_id = dbmail_headername.id "
-                . " INNER JOIN dbmail_headervalue ON dbmail_header.headervalue_id = dbmail_headervalue.id "
-                . " WHERE dbmail_header.physmessage_id = '{$this->dbmail->escape($physmessage_id)}' "
-                . " AND dbmail_headername.headername = 'in-reply-to' ";
+        $message = $this->retrieve_message($message_idnr, $folder, array(), FALSE);
+        $raw_headers_references_string = isset($message->references) ? $message->references : '';
+        foreach (explode(' ', $raw_headers_references_string) as $item) {
+            if (strlen(trim($item)) > 0) {
+                $response->ancesters[] = $this->clean_up_thread_message_id(trim($item));
+            }
+        }
 
-        $in_reply_to_result = $this->dbmail->query($in_reply_to_sql);
-
-        $in_reply_to_header = $this->dbmail->fetch_assoc($in_reply_to_result);
-
-        if (isset($in_reply_to_header['headervalue']) && strlen($in_reply_to_header['headervalue']) > 0) {
-
-            $response[] = $this->clean_up_thread_message_id($in_reply_to_header['headervalue']);
-
+        /**
+         * Done?
+         */
+        if (count($response->ancesters) > 0 && isset($response->ancesters[0]) && strlen($response->ancesters[0]) > 0) {
+            $response->base_thread_message_id = $response->ancesters[0];
             $this->update_cache($rcmh_cached_key, $response);
-
             return $response;
         }
 
         /**
-         * Nothing found...
+         * Third Step, 'references' not found on dbmail 'referencesfield' table 
+         * nor within message headers. Do we have a 'in-reply-to' header so we can consider it as ancester?
          */
+        if (isset($message->in_reply_to) && strlen($message->in_reply_to) > 0) {
+            $response->ancesters[] = $this->clean_up_thread_message_id(trim($message->in_reply_to));
+        }
+
+        /**
+         * Done?
+         */
+        if (count($response->ancesters) > 0 && isset($response->ancesters[0]) && strlen($response->ancesters[0]) > 0) {
+            $response->base_thread_message_id = $response->ancesters[0];
+            $this->update_cache($rcmh_cached_key, $response);
+            return $response;
+        }
+
+        /**
+         * Nothing found? Than use current 'message-id' header as base thread (or 
+         * generate a dummy one if not found) and leave an empty ancesters list.
+         */
+        $response->base_thread_message_id = isset($message->messageID) && strlen($message->messageID) > 0 ? $this->clean_up_thread_message_id(trim($message->messageID)) : microtime() . rand(0, 10000);
+        $response->ancesters = array();
+        $this->update_cache($rcmh_cached_key, $response);
         return $response;
     }
 
