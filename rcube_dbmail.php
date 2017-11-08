@@ -3970,6 +3970,13 @@ class rcube_dbmail extends rcube_storage {
                  * https://tools.ietf.org/html/rfc2231
                  */
 
+                // UTF8 decode filename
+                if(strpos($item, 'UTF-8') !== false && strpos($item, 'filename') !== false){
+                    $item = str_replace('filename*=UTF-8\'\'', '', $item);
+                    $filename_tmp = urldecode($item);
+                    $item = 'filename="'.  $filename_tmp . '"';
+                }
+
                 if (preg_match("/^{$ci_token}\*0\*{$delimiter}/i", $item)) {
                     /*
                      * - multi-line property
