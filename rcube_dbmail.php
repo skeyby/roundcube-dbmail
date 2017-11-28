@@ -42,19 +42,6 @@ class rcube_dbmail extends rcube_storage {
     private $response_code = null;
 
     /**
-     * Searchable message headers
-     */
-    private $searchable_headers = array(
-        'x-priority',
-        'subject',
-        'from',
-        'date',
-        'to',
-        'cc',
-        'bcc'
-    );
-
-    /**
      * Supported IMAP capabilities
      */
     private $imap_capabilities = array(
@@ -1628,11 +1615,11 @@ class rcube_dbmail extends rcube_storage {
             $raw_headers .= $header_name . $this->get_header_delimiter($header_name) . $header_value . "\n";
         }
 
-        // filter searchable headers and save them
-        $searchable_headers = $this->get_searchable_headers($raw_headers);
-        foreach ($searchable_headers as $header_name => $header_value) {
+        // filter saved headers and save them
+        $saved_headers = $this->get_saved_headers($mime_decoded->headers, $raw_headers);
+        foreach ($saved_headers as $header_name => $header_value) {
 
-            if (!$this->save_searchable_header($physmessage_id, $header_name, $header_value)) {
+            if (!$this->save_header($physmessage_id, $header_name, $header_value)) {
                 $this->dbmail->rollbackTransaction();
                 return FALSE;
             }
@@ -3970,9 +3957,15 @@ class rcube_dbmail extends rcube_storage {
                  * https://tools.ietf.org/html/rfc2231
                  */
 
+                
+                // filename*=UTF-8''Sito%20Feste%20dell%E2%80%99unita%CC%80.docx
+                // filename*0*=UTF-8''OVIDIO-TECH-RELAZIONE-DEL-REVISORE-LEGALE-DEI-CONTI-31
+                
                 // UTF8 decode filename
                 if(strpos($item, 'UTF-8') !== false && strpos($item, 'filename') !== false){
-                    $item = str_replace('filename*=UTF-8\'\'', '', $item);
+                    $res = array();
+                    preg_match('/=UTF-8\'\'(.*)$/', $item, $res);
+                    $item = $res[1];
                     $filename_tmp = urldecode($item);
                     $item = 'filename="'.  $filename_tmp . '"';
                 }
@@ -4228,7 +4221,7 @@ class rcube_dbmail extends rcube_storage {
          * Get cached contents
          */
         $rcmh_cached_key = "MSG_" . $message_idnr;
-        $rcmh_cached = $this->get_cache($rcmh_cached_key);
+        $rcmh_cached = $this->get_cache($rcmh_cached_key); //= null;
 
         /*
          * Checklist:
@@ -4542,23 +4535,23 @@ class rcube_dbmail extends rcube_storage {
 
                         $search_join_partlist_table = TRUE;
 
-                        $formatted_search[] = " "
+                            $formatted_search[] = " "
                                 . " ( "
                                 . "     search_dbmail_partlists.is_header = 0 "
                                 . "     AND search_dbmail_mimeparts.data LIKE '%{$this->dbmail->escape($search_term)}%' "
                                 . " ) ";
-
+                        
                         unset($exploded_search_str[$current_index]);
                     } elseif (strtoupper($current_item) == 'TEXT') {
                         // 2 items - eg.  TEXT 123456
 
                         $search_join_partlist_table = TRUE;
 
-                        $formatted_search[] = " "
-                                . " ( "
-                                . "     search_dbmail_partlists.is_header = 0 "
-                                . "     AND search_dbmail_mimeparts.data LIKE '%{$this->dbmail->escape($search_term)}%' "
-                                . " ) ";
+                            $formatted_search[] = " "
+                                    . " ( "
+                                    . "     search_dbmail_partlists.is_header = 0 "
+                                    . "     AND search_dbmail_mimeparts.data LIKE '%{$this->dbmail->escape($search_term)}%' "
+                                    . " ) ";
 
                         unset($exploded_search_str[$current_index]);
                     } else {
@@ -4874,7 +4867,7 @@ class rcube_dbmail extends rcube_storage {
         if (count($target_message_idnrs) > 0) {
             $where_conditions .= " AND dbmail_messages.message_idnr IN (" . implode(",", $target_message_idnrs) . ") ";
         }
-
+        
         /*
          *  Set 'order by' clause
          */
@@ -4923,8 +4916,8 @@ class rcube_dbmail extends rcube_storage {
         /*
          * When no additional joins needed, avoid 'DISTINCT' clause to speed up query execution
          */
-        $distinct_clause = (strlen($additional_filter_joins) > 0 ? 'DISTINCT' : '');
-
+        //$distinct_clause = (strlen($additional_filter_joins) > 0 ? 'DISTINCT' : '');
+        $distinct_clause = 'DISTINCT';
         /*
          *  Prepare base query
          */
@@ -4947,8 +4940,14 @@ class rcube_dbmail extends rcube_storage {
             $query .= " INNER JOIN dbmail_physmessage ON dbmail_messages.physmessage_id = dbmail_physmessage.id ";
         }
 
+        /*
+         * Set "group by" clause 
+         */
+        //$group_by = " GROUP BY dbmail_messages.unique_id ";
+        
         $query .= " {$additional_filter_joins} ";
         $query .= " {$where_conditions} ";
+        //$query .= " {$group_by} ";
         $query .= " {$sort_condition} ";
         $query .= " {$limit_condition} ";
 
@@ -6007,34 +6006,13 @@ class rcube_dbmail extends rcube_storage {
     }
 
     /**
-     * Retrieve searchable headers key / pairs
-     * @param string $raw_headers raw headers
-     * @return array
-     */
-    private function get_searchable_headers($raw_headers) {
-
-        $searchable_headers = array();
-
-        foreach ($this->searchable_headers as $header_name) {
-
-            $header_value = $this->get_header_value($raw_headers, $header_name);
-
-            if ($header_value) {
-                $searchable_headers[$header_name] = $header_value;
-            }
-        }
-
-        return $searchable_headers;
-    }
-
-    /**
-     * Store searchable header name / value pair
+     * Store header name / value pair
      * @param int $physmessage_id
      * @param string $header_name
      * @param string $header_value
      * @param boolean True on success, False on failure
      */
-    private function save_searchable_header($physmessage_id, $header_name, $header_value) {
+    private function save_header($physmessage_id, $header_name, $header_value) {
 
         /*
          *  add new header names to 'dbmail_headername' table?
@@ -6633,7 +6611,7 @@ class rcube_dbmail extends rcube_storage {
 
                 $segment = array_values($segment);
 
-                $segment_where_conditions = '';
+                $segment_where_conditions = array();
 
                 while (count($segment) > 0) {
 
@@ -6679,7 +6657,12 @@ class rcube_dbmail extends rcube_storage {
                     $additional_where_conditions .= " AND ";
                 }
 
-                $additional_where_conditions .= " ( " . implode(' OR ', $segment_where_conditions) . " ) ";
+                if(count($segment_where_conditions) == 0){
+                    $additional_where_conditions .= " ( " . implode(' OR ', '') . " ) ";
+                } else {
+                    $additional_where_conditions .= " ( " . implode(' OR ', $segment_where_conditions) . " ) ";
+                }
+                
             }
 
             /*
@@ -6695,7 +6678,6 @@ class rcube_dbmail extends rcube_storage {
              */
             $search_string = substr_replace($search_string, $placeholder, $opening_parenthesis_position, ($closing_parenthesis_position - $opening_parenthesis_position + 1));
         }
-
 
         /*
          * At this point, $placeholders list must contain only 1 item
@@ -7015,10 +6997,19 @@ class rcube_dbmail extends rcube_storage {
                     "INNER JOIN dbmail_mimeparts AS {$dbmail_mimeparts_alias} ON {$dbmail_partlists_alias}.part_id = {$dbmail_mimeparts_alias}.id"
                 );
 
-                if (!$is_not) {
-                    $search_conditions->additional_where_conditions = "{$dbmail_partlists_alias}.is_header = 0 AND {$dbmail_mimeparts_alias}.data LIKE '%{$this->dbmail->escape($search_value)}%'";
+                $full_text_research_on = $this->rcubeInstance->config->get('full_text_research_on', null);
+                if(!is_null($full_text_research_on) && $full_text_research_on === true){
+                    if (!$is_not) {
+                        $search_conditions->additional_where_conditions = "{$dbmail_partlists_alias}.is_header = 0 AND MATCH ({$dbmail_mimeparts_alias}.data) AGAINST ('{$this->dbmail->escape($search_value)}*' IN BOOLEAN MODE)";
+                    } else {
+                        $search_conditions->additional_where_conditions = "{$dbmail_partlists_alias}.is_header = 0 AND NOT MATCH ({$dbmail_mimeparts_alias}.data) AGAINST ('{$this->dbmail->escape($search_value)}*' IN BOOLEAN MODE)";
+                    }
                 } else {
-                    $search_conditions->additional_where_conditions = "{$dbmail_partlists_alias}.is_header = 0 AND {$dbmail_mimeparts_alias}.data NOT LIKE '%{$this->dbmail->escape($search_value)}%'";
+                    if (!$is_not) {
+                        $search_conditions->additional_where_conditions = "{$dbmail_partlists_alias}.is_header = 0 AND {$dbmail_mimeparts_alias}.data LIKE '%{$this->dbmail->escape($search_value)}%'";
+                    } else {
+                        $search_conditions->additional_where_conditions = "{$dbmail_partlists_alias}.is_header = 0 AND {$dbmail_mimeparts_alias}.data NOT LIKE '%{$this->dbmail->escape($search_value)}%'";
+                    }
                 }
 
                 /*
@@ -7824,10 +7815,19 @@ class rcube_dbmail extends rcube_storage {
                     "INNER JOIN dbmail_mimeparts AS {$dbmail_mimeparts_alias} ON {$dbmail_partlists_alias}.part_id = {$dbmail_mimeparts_alias}.id"
                 );
 
-                if (!$is_not) {
-                    $search_conditions->additional_where_conditions = "{$dbmail_mimeparts_alias}.data LIKE '%{$this->dbmail->escape($search_value)}%'";
+                $full_text_research_on = $this->rcubeInstance->config->get('full_text_research_on', null);
+                if(!is_null($full_text_research_on) && $full_text_research_on === true){
+                    if (!$is_not) {
+                        $search_conditions->additional_where_conditions = "MATCH ({$dbmail_mimeparts_alias}.data) AGAINST ('{$this->dbmail->escape($search_value)}*' IN BOOLEAN MODE)";
+                    } else {
+                        $search_conditions->additional_where_conditions = "NOT MATCH ({$dbmail_mimeparts_alias}.data) AGAINST ('{$this->dbmail->escape($search_value)}*' IN BOOLEAN MODE)";
+                    }
                 } else {
-                    $search_conditions->additional_where_conditions = "{$dbmail_mimeparts_alias}.data NOT LIKE '%{$this->dbmail->escape($search_value)}%'";
+                    if (!$is_not) {
+                        $search_conditions->additional_where_conditions = "{$dbmail_mimeparts_alias}.data LIKE '%{$this->dbmail->escape($search_value)}%'";
+                    } else {
+                        $search_conditions->additional_where_conditions = "{$dbmail_mimeparts_alias}.data NOT LIKE '%{$this->dbmail->escape($search_value)}%'";
+                    }
                 }
 
                 /*
@@ -8194,6 +8194,27 @@ class rcube_dbmail extends rcube_storage {
 
             return strnatcmp($a->internaldate_GMT, $b->internaldate_GMT);
         };
+    }
+    
+    /**
+     * Retrieve saved headers key / pairs
+     * @param string $raw_headers raw headers
+     * @return array
+     */
+    private function get_saved_headers($array_headers, $raw_headers) {
+
+        $saved_headers = array();
+
+        foreach ($array_headers as $header_name => $value) {
+
+            $header_value = $this->get_header_value($raw_headers, $header_name);
+
+            if ($header_value) {
+                $saved_headers[$header_name] = $header_value;
+            }
+        }
+
+        return $saved_headers;
     }
 
 }
