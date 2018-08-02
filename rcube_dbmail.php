@@ -267,6 +267,54 @@ class rcube_dbmail extends rcube_storage {
             return FALSE;
         }
 
+        //Loggare autenticazione in dbmail_authlog
+
+        if (isset($_SERVER['HTTP_X_FORWARDED_FOR'])){
+            list($remoteAddr) = explode(',', $_SERVER['HTTP_X_FORWARDED_FOR']);
+        } else {
+            $remoteAddr = isset($_SERVER['REMOTE_ADDR']) ? $_SERVER['REMOTE_ADDR'] : 'N/D';
+        }
+        
+        $remotePort = isset($_SERVER['REMOTE_PORT']) ? $_SERVER['REMOTE_PORT'] : null;
+        $serverAddr = isset($_SERVER['SERVER_ADDR']) ? $_SERVER['SERVER_ADDR'] : 'N/D';
+        $serverPort = isset($_SERVER['SERVER_PORT']) ? $_SERVER['SERVER_PORT'] : null;
+        
+        $now = new DateTime();
+        
+        /*
+         * Create insert into dbmail_authlog
+         */
+        $query = "INSERT INTO dbmail_authlog "
+                . " ( "
+                . "    userid, "
+                . "    service, "
+                . "    login_time, "
+                . "    src_ip, "
+                . "    src_port, "
+                . "    dst_ip, "
+                . "    dst_port, "
+                . "    status"
+                . ""
+                . " ) "
+                . " VALUES "
+                . " ( "
+                . "    '{$user}', "
+                . "    'auth', "
+                . "    '{$now->format('Y-m-d H:i:s')}',"
+                . "    '{$remoteAddr}',"
+                . "    '{$remotePort}',"
+                . "    '{$serverAddr}',"
+                . "    '{$serverPort}',"
+                . "    'authOK'"
+                . " ) ";
+        
+        if (!$this->dbmail->query($query)) {
+            return FALSE;
+        }
+        
+        // Retrieve inserted ID
+        //$dbmail_authlog_id = $this->dbmail->insert_id('dbmail_authlog');
+                
         // OK - store user identity within session data
         $this->user_idnr = $row['user_idnr'];
         $_SESSION['user_idnr'] = $this->user_idnr;
@@ -4091,17 +4139,6 @@ class rcube_dbmail extends rcube_storage {
     private function get_header_id_by_header_name($header_name) {
 
         /**
-          Roundcube doesn't use some standard RFC names, so we have
-          to normalize this.
-          Roundcube "arrival" corresponds to "received", but - WARNING -
-          received isn't a required header, so the results are pretty strange
-          maybe assuming arrival == data could be a better solution
-         */
-        if ($header_name == "arrival") {
-            $header_name = "received";
-        }
-
-        /**
          * Search for cached items
          */
         $cache_key = "HEADERS_LOOKUP";
@@ -4876,7 +4913,6 @@ class rcube_dbmail extends rcube_storage {
             case 'from':
             case 'to':
             case 'cc':
-            case 'arrival':
             case 'date':
                 /*
                  *  'subject' / 'from' and 'date' values are stored into 'dbmail_headervalue' table
@@ -4891,6 +4927,14 @@ class rcube_dbmail extends rcube_storage {
                         . " LEFT JOIN dbmail_headervalue AS sort_dbmail_headervalue ON sort_dbmail_header.headervalue_id = sort_dbmail_headervalue.id ";
 
                 $sort_condition = " ORDER BY sort_dbmail_headervalue.sortfield {$this->dbmail->escape($sort_order)} ";
+                break;
+            case 'arrival':
+                /*
+                 *  'arrival' value is stored into 'dbmail_physmessage' table as internal_date
+                 */
+                $additional_sort_joins = " INNER JOIN dbmail_physmessage AS sort_dbmail_physmessage ON dbmail_messages.physmessage_id = sort_dbmail_physmessage.id ";
+
+                $sort_condition = " ORDER BY sort_dbmail_physmessage.internal_date {$this->dbmail->escape($sort_order)} ";
                 break;
             case 'size':
                 /*
@@ -6991,27 +7035,43 @@ class rcube_dbmail extends rcube_storage {
 
                 $sequence++;
                 $dbmail_mimeparts_alias = "dbmail_mimeparts_{$sequence}";
+                
+                $sequence++;
+                $dbmail_mimeparts_fts_alias = "dbmail_mimeparts_fts_{$sequence}";
 
-                $search_conditions->additional_joins = array(
-                    "INNER JOIN dbmail_partlists AS  {$dbmail_partlists_alias} ON dbmail_physmessage.id = {$dbmail_partlists_alias}.physmessage_id",
-                    "INNER JOIN dbmail_mimeparts AS {$dbmail_mimeparts_alias} ON {$dbmail_partlists_alias}.part_id = {$dbmail_mimeparts_alias}.id"
-                );
-
-                $full_text_research_on = $this->rcubeInstance->config->get('full_text_research_on', null);
-                if(!is_null($full_text_research_on) && $full_text_research_on === true){
-                    if (!$is_not) {
-                        $search_conditions->additional_where_conditions = "{$dbmail_partlists_alias}.is_header = 0 AND MATCH ({$dbmail_mimeparts_alias}.data) AGAINST ('{$this->dbmail->escape($search_value)}*' IN BOOLEAN MODE)";
+                $full_text_search = $this->rcubeInstance->config->get('full_text_search', null);
+                $full_text_table_fts = $this->rcubeInstance->config->get('full_text_table_fts', null);
+                
+                if(!is_null($full_text_table_fts) && $full_text_table_fts === true){
+                    $search_conditions->additional_joins = array(
+                        "INNER JOIN dbmail_partlists AS  {$dbmail_partlists_alias} ON dbmail_physmessage.id = {$dbmail_partlists_alias}.physmessage_id",
+                        "INNER JOIN dbmail_mimeparts_fts AS {$dbmail_mimeparts_fts_alias} ON {$dbmail_partlists_alias}.part_id = {$dbmail_mimeparts_fts_alias}.id",
+                    );  
+                    if(!is_null($full_text_search) && $full_text_search === true){
+                        if (!$is_not) {
+                            $search_conditions->additional_where_conditions = "MATCH ({$dbmail_mimeparts_fts_alias}.data) AGAINST ('{$this->dbmail->escape($search_value)}' IN BOOLEAN MODE)";
+                        } else {
+                            $search_conditions->additional_where_conditions = "NOT MATCH ({$dbmail_mimeparts_fts_alias}.data) AGAINST ('{$this->dbmail->escape($search_value)}' IN BOOLEAN MODE)";
+                        }
                     } else {
-                        $search_conditions->additional_where_conditions = "{$dbmail_partlists_alias}.is_header = 0 AND NOT MATCH ({$dbmail_mimeparts_alias}.data) AGAINST ('{$this->dbmail->escape($search_value)}*' IN BOOLEAN MODE)";
+                        if (!$is_not) {
+                            $search_conditions->additional_where_conditions = "{$dbmail_mimeparts_fts_alias}.data LIKE '%{$this->dbmail->escape($search_value)}%'";
+                        } else {
+                            $search_conditions->additional_where_conditions = "{$dbmail_mimeparts_fts_alias}.data NOT LIKE '%{$this->dbmail->escape($search_value)}%'";
+                        }
                     }
-                } else {
+                }else{
+                    $search_conditions->additional_joins = array(
+                        "INNER JOIN dbmail_partlists AS  {$dbmail_partlists_alias} ON dbmail_physmessage.id = {$dbmail_partlists_alias}.physmessage_id",
+                        "INNER JOIN dbmail_mimeparts AS {$dbmail_mimeparts_alias} ON {$dbmail_partlists_alias}.part_id = {$dbmail_mimeparts_alias}.id"
+                    ); 
                     if (!$is_not) {
                         $search_conditions->additional_where_conditions = "{$dbmail_partlists_alias}.is_header = 0 AND {$dbmail_mimeparts_alias}.data LIKE '%{$this->dbmail->escape($search_value)}%'";
                     } else {
                         $search_conditions->additional_where_conditions = "{$dbmail_partlists_alias}.is_header = 0 AND {$dbmail_mimeparts_alias}.data NOT LIKE '%{$this->dbmail->escape($search_value)}%'";
                     }
                 }
-
+                
                 /*
                  * Unset managed items
                  */
@@ -7815,12 +7875,12 @@ class rcube_dbmail extends rcube_storage {
                     "INNER JOIN dbmail_mimeparts AS {$dbmail_mimeparts_alias} ON {$dbmail_partlists_alias}.part_id = {$dbmail_mimeparts_alias}.id"
                 );
 
-                $full_text_research_on = $this->rcubeInstance->config->get('full_text_research_on', null);
-                if(!is_null($full_text_research_on) && $full_text_research_on === true){
+                $full_text_search = $this->rcubeInstance->config->get('full_text_search', null);
+                if(!is_null($full_text_search) && $full_text_search === true){
                     if (!$is_not) {
-                        $search_conditions->additional_where_conditions = "MATCH ({$dbmail_mimeparts_alias}.data) AGAINST ('{$this->dbmail->escape($search_value)}*' IN BOOLEAN MODE)";
+                        $search_conditions->additional_where_conditions = "MATCH ({$dbmail_mimeparts_alias}.data) AGAINST ('{$this->dbmail->escape($search_value)}' IN BOOLEAN MODE)";
                     } else {
-                        $search_conditions->additional_where_conditions = "NOT MATCH ({$dbmail_mimeparts_alias}.data) AGAINST ('{$this->dbmail->escape($search_value)}*' IN BOOLEAN MODE)";
+                        $search_conditions->additional_where_conditions = "NOT MATCH ({$dbmail_mimeparts_alias}.data) AGAINST ('{$this->dbmail->escape($search_value)}' IN BOOLEAN MODE)";
                     }
                 } else {
                     if (!$is_not) {
