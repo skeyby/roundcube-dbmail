@@ -811,13 +811,20 @@ class rcube_dbmail extends rcube_storage {
             $query .= " INNER JOIN dbmail_physmessage ON dbmail_messages.physmessage_id = dbmail_physmessage.id ";
         }
 
-        $query .= " {$additional_joins} ";
+        $query .= " {$additional_joins} "; 
         $query .= " {$where_conditions} ";
-
+        
+        if ($this->rcubeInstance->config->get('dbmail_messages_disable_cache')){
+            $query .= " group by dbmail_messages.message_idnr "; //patched cc'
+        }
         /*
          * Execute query
          */
         $res = $this->dbmail->query($query);
+        
+        if ($this->rcubeInstance->config->get('dbmail_messages_disable_cache')){
+            return $res->rowCount();
+        }
 
         /*
          * Retrieve full messages count and folder specific messages count
